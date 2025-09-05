@@ -1,33 +1,27 @@
-// Preload script - exposes IPC API to renderer via contextBridge
-import { contextBridge, ipcRenderer } from 'electron';
+const { contextBridge, ipcRenderer } = require('electron');
 
-// Expose IPC API to renderer
-contextBridge.exposeInMainWorld('electronAPI', {
-    // File/folder scanning
-    scanDropped: (paths) => ipcRenderer.invoke('scanDropped', { paths }),
-    
-    // Analysis control
-    startAnalysis: (options) => ipcRenderer.invoke('startAnalysis', options),
+// Expose IPC methods matching the PRD exactly
+contextBridge.exposeInMainWorld('api', {
+    // Simple ping for diagnostics
+    ping: () => 'pong',
+    // Renderer → Main (invoke)
+    scanDropped: (params) => ipcRenderer.invoke('scanDropped', params),
+    startAnalysis: (params) => ipcRenderer.invoke('startAnalysis', params),
     clearQueue: () => ipcRenderer.invoke('clearQueue'),
-    
-    // Settings
     getSettings: () => ipcRenderer.invoke('getSettings'),
-    updateSettings: (settings) => ipcRenderer.invoke('updateSettings', settings),
-    
-    // Database operations
+    updateSettings: (params) => ipcRenderer.invoke('updateSettings', params),
+    chooseFolder: () => ipcRenderer.invoke('chooseFolder'),
     updateDatabase: () => ipcRenderer.invoke('updateDatabase'),
     updateCriteriaDb: () => ipcRenderer.invoke('updateCriteriaDb'),
-    
-    // Health check
     runHealthCheck: () => ipcRenderer.invoke('runHealthCheck'),
     
-    // Event listeners for updates from main process
-    onQueueUpdate: (callback) => ipcRenderer.on('queueUpdate', callback),
-    onJobProgress: (callback) => ipcRenderer.on('jobProgress', callback),
-    onJobDone: (callback) => ipcRenderer.on('jobDone', callback),
-    onJobError: (callback) => ipcRenderer.on('jobError', callback),
-    onLog: (callback) => ipcRenderer.on('log', callback),
-    
-    // Remove listeners
-    removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel)
+    // Main → Renderer (events)
+    onQueueUpdate: (callback) => ipcRenderer.on('queueUpdate', (event, data) => callback(data)),
+    onJobProgress: (callback) => ipcRenderer.on('jobProgress', (event, data) => callback(data)),
+    onJobDone: (callback) => ipcRenderer.on('jobDone', (event, data) => callback(data)),
+    onJobError: (callback) => ipcRenderer.on('jobError', (event, data) => callback(data)),
+    onLog: (callback) => ipcRenderer.on('log', (event, data) => callback(data))
 });
+
+
+

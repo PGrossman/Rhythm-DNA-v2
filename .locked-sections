@@ -1,0 +1,40 @@
+# LOCKED CODE SECTIONS
+# DO NOT MODIFY WITHOUT APPROVAL
+
+## app/renderer.js
+
+### Section: Views Object - Settings
+- Lines: 7-160 (overall views block is locked; settings view complete)
+- Locked element: Complete settings view implementation
+- Locked by: Philip
+- Date: 2025-09-05
+- Reason: Settings page complete with persistence working
+
+### Section: Settings Handlers
+- Lines: 200-292 (handlers and helpers)
+- Locked functions: setupSettingsHandlers, loadSettings, saveSettings, runHealthCheck, showStatus
+- Locked by: Philip
+- Date: 2025-09-05
+- Reason: All settings functionality tested and working
+
+## Instructions
+- Do NOT modify code between LOCKED SECTION markers
+- Contact Philip before making any changes
+- To unlock: Remove markers and update this file
+
+# LOCKED CODE SECTIONS
+# DO NOT MODIFY WITHOUT APPROVAL
+
+## app/renderer.js
+### Section: Views Object
+- Lines: around the declaration of `const views`
+- Locked element: analyze view string template
+- Locked by: Philip
+- Date: 2025-09-05
+- Reason: Analyze view finalized
+
+## Instructions
+- Do NOT modify code between LOCKED SECTION markers
+- Contact Philip before making any changes
+- To unlock: Remove markers and update this file
+

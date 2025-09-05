@@ -7,8 +7,8 @@ export class Writers {
     }
     
     // TODO: Implement file writing
-    // - basename.analysis.json
-    // - basename.analysis.csv
+    // - basename.json
+    // - basename.csv
     // - Write for both MP3 and WAV if paired
 }
 
