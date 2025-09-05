@@ -1,139 +1,33 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
-import path from 'node:path';
-import fs from 'node:fs';
-import Store from 'electron-store';
-import os from 'node:os';
+// Preload script - exposes IPC API to renderer via contextBridge
+import { contextBridge, ipcRenderer } from 'electron';
 
-// Initialize settings store
-const store = new Store({
-    defaults: {
-        dbFolder: null,
-        autoUpdateDb: true,
-        creativeModel: 'qwen3:8b',
-        concurrencyTech: 4,
-        concurrencyCreative: 2
-    }
-});
-
-// App single instance lock
-if (!app.requestSingleInstanceLock()) {
-    app.quit();
-}
-
-let mainWindow;
-
-const createWindow = () => {
-    mainWindow = new BrowserWindow({
-        width: 1200,
-        height: 800,
-        webPreferences: {
-            preload: path.join(app.getAppPath(), 'app', 'preload.js'),
-            contextIsolation: true,
-            nodeIntegration: false
-        }
-    });
-
-    mainWindow.loadFile(path.join(app.getAppPath(), 'app', 'renderer.html'));
-};
-
-// IPC Handlers
-ipcMain.handle('getSettings', () => {
-    return store.store;
-});
-
-ipcMain.handle('updateSettings', (event, partial) => {
-    Object.keys(partial).forEach(key => {
-        store.set(key, partial[key]);
-    });
-    return store.store;
-});
-
-ipcMain.handle('scanDropped', async (event, { paths }) => {
-    console.log('Scanning dropped paths:', paths);
+// Expose IPC API to renderer
+contextBridge.exposeInMainWorld('electronAPI', {
+    // File/folder scanning
+    scanDropped: (paths) => ipcRenderer.invoke('scanDropped', { paths }),
     
-    const tracks = paths.map((filepath, index) => ({
-        id: `track_${index}`,
-        filepath: filepath,
-        filename: path.basename(filepath),
-        techStatus: 'QUEUED',
-        creativeStatus: 'QUEUED'
-    }));
+    // Analysis control
+    startAnalysis: (options) => ipcRenderer.invoke('startAnalysis', options),
+    clearQueue: () => ipcRenderer.invoke('clearQueue'),
     
-    return { tracks };
-});
-
-ipcMain.handle('startAnalysis', async (event, options = {}) => {
-    console.log('Starting analysis with options:', options);
-    return { success: true };
-});
-
-ipcMain.handle('clearQueue', async () => {
-    console.log('Clearing queue');
-    return { success: true };
-});
-
-ipcMain.handle('updateDatabase', async () => {
-    console.log('Updating database');
-    return { success: true };
-});
-
-ipcMain.handle('updateCriteriaDb', async () => {
-    console.log('Updating criteria database');
-    return { success: true };
-});
-
-ipcMain.handle('runHealthCheck', async () => {
-    const results = {
-        ffprobe: true,
-        ffmpeg: true,
-        ollama: false
-    };
+    // Settings
+    getSettings: () => ipcRenderer.invoke('getSettings'),
+    updateSettings: (settings) => ipcRenderer.invoke('updateSettings', settings),
     
-    console.log('Health check results:', results);
-    return results;
-});
-
-// Database folder check
-const checkDbFolder = async () => {
-    const dbFolder = store.get('dbFolder');
+    // Database operations
+    updateDatabase: () => ipcRenderer.invoke('updateDatabase'),
+    updateCriteriaDb: () => ipcRenderer.invoke('updateCriteriaDb'),
     
-    if (!dbFolder) {
-        const result = await dialog.showOpenDialog(mainWindow, {
-            title: 'Select Database Folder',
-            message: 'Choose a folder to store RhythmDNA database files',
-            properties: ['openDirectory', 'createDirectory'],
-            defaultPath: path.join(os.homedir(), 'Documents', 'RhythmDNA')
-        });
-        
-        if (!result.canceled && result.filePaths.length > 0) {
-            const selectedPath = result.filePaths[0];
-            store.set('dbFolder', selectedPath);
-            
-            if (!fs.existsSync(selectedPath)) {
-                fs.mkdirSync(selectedPath, { recursive: true });
-            }
-            
-            console.log('Database folder set to:', selectedPath);
-        } else {
-            app.quit();
-        }
-    }
-};
-
-app.whenReady().then(async () => {
-    createWindow();
+    // Health check
+    runHealthCheck: () => ipcRenderer.invoke('runHealthCheck'),
     
-    setTimeout(checkDbFolder, 1000);
-
-    app.on('activate', () => {
-        if (BrowserWindow.getAllWindows().length === 0) {
-            createWindow();
-        }
-    });
-});
-
-app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
-        app.quit();
-    }
+    // Event listeners for updates from main process
+    onQueueUpdate: (callback) => ipcRenderer.on('queueUpdate', callback),
+    onJobProgress: (callback) => ipcRenderer.on('jobProgress', callback),
+    onJobDone: (callback) => ipcRenderer.on('jobDone', callback),
+    onJobError: (callback) => ipcRenderer.on('jobError', callback),
+    onLog: (callback) => ipcRenderer.on('log', callback),
+    
+    // Remove listeners
+    removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel)
 });

@@ -1,29 +1,14 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
-import Store from 'electron-store';
-import os from 'node:os';
-
-// Initialize settings store
-const store = new Store({
-    defaults: {
-        dbFolder: null,
-        autoUpdateDb: true,
-        creativeModel: 'qwen3:8b',
-        concurrencyTech: 4,
-        concurrencyCreative: 2
-    }
-});
 
 // App single instance lock
 if (!app.requestSingleInstanceLock()) {
     app.quit();
 }
 
-let mainWindow;
-
 const createWindow = () => {
-    mainWindow = new BrowserWindow({
+    const win = new BrowserWindow({
         width: 1200,
         height: 800,
         webPreferences: {
@@ -33,28 +18,24 @@ const createWindow = () => {
         }
     });
 
-    mainWindow.loadFile(path.join(app.getAppPath(), 'app', 'renderer.html'));
+    win.loadFile(path.join(app.getAppPath(), 'app', 'renderer.html'));
+    
+    // Open DevTools in development
+    if (process.env.NODE_ENV === 'development') {
+        win.webContents.openDevTools();
+    }
 };
 
-// IPC Handlers
-ipcMain.handle('getSettings', () => {
-    return store.store;
-});
-
-ipcMain.handle('updateSettings', (event, partial) => {
-    Object.keys(partial).forEach(key => {
-        store.set(key, partial[key]);
-    });
-    return store.store;
-});
-
+// Basic IPC handlers (these will be expanded later)
 ipcMain.handle('scanDropped', async (event, { paths }) => {
-    console.log('Scanning dropped paths:', paths);
+    console.log('Main: scanDropped called with:', paths);
     
-    const tracks = paths.map((filepath, index) => ({
+    // For now, return a mock response
+    // TODO: Implement actual file scanning logic
+    const tracks = paths.map((filePath, index) => ({
         id: `track_${index}`,
-        filepath: filepath,
-        filename: path.basename(filepath),
+        fileName: path.basename(filePath),
+        filePath: filePath,
         techStatus: 'QUEUED',
         creativeStatus: 'QUEUED'
     }));
@@ -62,68 +43,60 @@ ipcMain.handle('scanDropped', async (event, { paths }) => {
     return { tracks };
 });
 
-ipcMain.handle('startAnalysis', async (event, options = {}) => {
-    console.log('Starting analysis with options:', options);
+ipcMain.handle('startAnalysis', async (event, options) => {
+    console.log('Main: startAnalysis called with:', options);
+    // TODO: Implement analysis logic
     return { success: true };
 });
 
-ipcMain.handle('clearQueue', async () => {
-    console.log('Clearing queue');
+ipcMain.handle('clearQueue', async (event) => {
+    console.log('Main: clearQueue called');
+    // TODO: Implement queue clearing logic
     return { success: true };
 });
 
-ipcMain.handle('updateDatabase', async () => {
-    console.log('Updating database');
-    return { success: true };
-});
-
-ipcMain.handle('updateCriteriaDb', async () => {
-    console.log('Updating criteria database');
-    return { success: true };
-});
-
-ipcMain.handle('runHealthCheck', async () => {
-    const results = {
-        ffprobe: true,
-        ffmpeg: true,
-        ollama: false
+ipcMain.handle('getSettings', async (event) => {
+    console.log('Main: getSettings called');
+    // TODO: Implement settings retrieval
+    return { 
+        dbFolder: null,
+        autoUpdateDb: true,
+        creativeModel: 'qwen3:8b',
+        concurrencyTech: 4,
+        concurrencyCreative: 2
     };
-    
-    console.log('Health check results:', results);
-    return results;
 });
 
-// Database folder check
-const checkDbFolder = async () => {
-    const dbFolder = store.get('dbFolder');
-    
-    if (!dbFolder) {
-        const result = await dialog.showOpenDialog(mainWindow, {
-            title: 'Select Database Folder',
-            message: 'Choose a folder to store RhythmDNA database files',
-            properties: ['openDirectory', 'createDirectory'],
-            defaultPath: path.join(os.homedir(), 'Documents', 'RhythmDNA')
-        });
-        
-        if (!result.canceled && result.filePaths.length > 0) {
-            const selectedPath = result.filePaths[0];
-            store.set('dbFolder', selectedPath);
-            
-            if (!fs.existsSync(selectedPath)) {
-                fs.mkdirSync(selectedPath, { recursive: true });
-            }
-            
-            console.log('Database folder set to:', selectedPath);
-        } else {
-            app.quit();
-        }
-    }
-};
+ipcMain.handle('updateSettings', async (event, settings) => {
+    console.log('Main: updateSettings called with:', settings);
+    // TODO: Implement settings update logic
+    return { success: true };
+});
 
-app.whenReady().then(async () => {
+ipcMain.handle('updateDatabase', async (event) => {
+    console.log('Main: updateDatabase called');
+    // TODO: Implement database update logic
+    return { success: true };
+});
+
+ipcMain.handle('updateCriteriaDb', async (event) => {
+    console.log('Main: updateCriteriaDb called');
+    // TODO: Implement criteria DB update logic
+    return { success: true };
+});
+
+ipcMain.handle('runHealthCheck', async (event) => {
+    console.log('Main: runHealthCheck called');
+    // TODO: Implement health check logic
+    return { 
+        ffprobe: { status: 'ok', message: 'Available' },
+        ffmpeg: { status: 'ok', message: 'Available' },
+        ollama: { status: 'ok', message: 'Reachable' }
+    };
+});
+
+app.whenReady().then(() => {
     createWindow();
-    
-    setTimeout(checkDbFolder, 1000);
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
