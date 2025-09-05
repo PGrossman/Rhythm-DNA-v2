@@ -3,7 +3,6 @@ node_modules
 # OS/editor and build artifacts
 .DS_Store
 app/.DS_Store
-debug.log
 *.settings-locked-backup
 *.zip
 node_modules/
@@ -11,3 +10,4 @@ dist/
 out/
 coverage/
 *.log
+!debug.log
