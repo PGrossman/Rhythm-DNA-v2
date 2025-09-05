@@ -1,0 +1,25 @@
+
+> rhythmdna@1.0.0 start
+> electron-forge start
+
+[STARTED] Checking your system
+[STARTED] Checking git exists
+[STARTED] Checking node version
+[STARTED] Checking packageManager version
+[TITLE] Found node@22.14.0
+[SUCCESS] Found node@22.14.0
+[TITLE] Found git@Git-154)
+[SUCCESS] Found git@Git-154)
+[TITLE] Found npm@10.9.2
+[SUCCESS] Found npm@10.9.2
+[SUCCESS] Checking your system
+[STARTED] Locating application
+[SUCCESS] Locating application
+[STARTED] Loading configuration
+[SUCCESS] Loading configuration
+[STARTED] Preparing native dependencies
+[TITLE] Preparing native dependencies
+[SUCCESS] Preparing native dependencies
+[STARTED] Running generateAssets hook
+[SUCCESS] Running generateAssets hook
+
