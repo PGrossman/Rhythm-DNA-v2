@@ -49,28 +49,33 @@ async function ffmpegLoudness(filePath) {
   
   const stderr = await run('ffmpeg', args, { collect: 'stderr' });
   
+  // Normalize Unicode minus (U+2212) to ASCII hyphen
+  const s = stderr.replace(/\u2212/g, '-');
+  
   // Debug: log the full stderr to see what we're getting
-  console.log('[LOUDNESS] Raw stderr (first 500 chars):', stderr.substring(0, 500));
+  console.log('[LOUDNESS] Raw stderr (first 500 chars):', s.substring(0, 500));
   
   // Parse EBU R128 output - look for both formats
   // Format 1: "I:         -14.2 LUFS"
   // Format 2: "Integrated loudness: -14.2 LUFS"
-  const mI = /I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i.exec(stderr) || 
-             /Integrated loudness:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i.exec(stderr);
+  const mI = /I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i.exec(s) || 
+             /Integrated loudness:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i.exec(s);
   
-  const mLRA = /LRA:\s*(-?\d+(?:\.\d+)?)\s*LU/i.exec(stderr) || 
-               /Loudness range:\s*(-?\d+(?:\.\d+)?)\s*LU/i.exec(stderr);
+  const mLRA = /LRA:\s*(-?\d+(?:\.\d+)?)\s*LU\b/i.exec(s) || 
+               /Loudness range:\s*(-?\d+(?:\.\d+)?)\s*LU\b/i.exec(s);
   
   // True peak is usually reported as dBTP (not dBFS). Support both, plus "TP:" variants.
-  const mTP = /True peak:\s*(-?\d+(?:\.\d+)?)\s*dBTP/i.exec(stderr) ||
-              /True peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS/i.exec(stderr) ||
-              /TP:\s*(-?\d+(?:\.\d+)?)\s*dB(?:TP|FS)/i.exec(stderr) ||
-              /Peak:\s*(-?\d+(?:\.\d+)?)\s*dB(?:TP|FS)/i.exec(stderr);
+  const mTP = /True peak:\s*(-?\d+(?:\.\d+)?)\s*dBTP/i.exec(s) ||
+              /True peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS/i.exec(s) ||
+              /TP:\s*(-?\d+(?:\.\d+)?)\s*dB(?:TP|FS)/i.exec(s) ||
+              /Peak:\s*(-?\d+(?:\.\d+)?)\s*dB(?:TP|FS)/i.exec(s);
   
-  console.log(`[LOUDNESS] Parsed - LUFS: ${mI?.[1]}, LRA: ${mLRA?.[1]}, True Peak: ${mTP?.[1]}`);
+  const parsedI = mI ? Number(mI[1]) : null;
+  console.log(`[LOUDNESS] Parsed - LUFS: ${parsedI}, LRA: ${mLRA?.[1]}, True Peak: ${mTP?.[1]}`);
   
-  // If Integrated LUFS failed to parse, fall back to loudnorm measurement mode.
-  if (!mI) {
+  // If LUFS is missing or out of sane range [-50, 0], fall back to loudnorm
+  const lufsBad = (parsedI == null) || !Number.isFinite(parsedI) || parsedI < -50 || parsedI > 0;
+  if (lufsBad) {
     console.log('[LOUDNESS] ebur128 parsing failed, trying loudnorm fallback...');
     const lnArgs = ['-hide_banner', '-nostats', '-i', filePath, '-af', 'loudnorm=print_format=json', '-f', 'null', '-'];
     const ln = await run('ffmpeg', lnArgs, { collect: 'stderr' });
@@ -79,16 +84,17 @@ async function ffmpegLoudness(filePath) {
     const iI   = /"input_i"\s*:\s*"(-?\d+(?:\.\d+)?)"/i.exec(ln);
     const iTP  = /"input_tp"\s*:\s*"(-?\d+(?:\.\d+)?)"/i.exec(ln);
     const iLRA = /"input_lra"\s*:\s*"(-?\d+(?:\.\d+)?)"/i.exec(ln);
-    console.log(`[LOUDNESS] loudnorm fallback - LUFS: ${iI?.[1]}, LRA: ${iLRA?.[1]}, TP: ${iTP?.[1]}`);
+    const lnI = iI ? Number(iI[1]) : null;
+    console.log(`[LOUDNESS] loudnorm fallback - LUFS: ${lnI}, LRA: ${iLRA?.[1]}, TP: ${iTP?.[1]}`);
     return {
-      lufs_integrated: iI ? Number(iI[1]) : null,
+      lufs_integrated: (Number.isFinite(lnI) && lnI >= -50 && lnI <= 0) ? lnI : null,
       loudness_range:  iLRA ? Number(iLRA[1]) : null,
       true_peak_db:    iTP ? Number(iTP[1]) : (mTP ? Number(mTP[1]) : null)
     };
   }
   
   return {
-    lufs_integrated: Number(mI[1]),
+    lufs_integrated: parsedI,
     loudness_range:  mLRA ? Number(mLRA[1]) : null,
     true_peak_db:    mTP ? Number(mTP[1]) : null
   };
@@ -431,7 +437,7 @@ async function analyzeMp3(filePath, win = null) {
     ['Duration (seconds)', analysis.duration_sec || ''],
     ['Sample Rate (Hz)', analysis.sample_rate || ''],
     ['Channels', analysis.channels === 2 ? 'Stereo' : analysis.channels === 1 ? 'Mono' : analysis.channels || ''],
-    ['Average Loudness (LUFS)', analysis.lufs_integrated || ''],
+    ['Average Loudness (LUFS)', analysis.lufs_integrated ?? ''],
     ['Estimated Tempo (BPM)', analysis.estimated_tempo_bpm || ''],
     ['', ''],
     ['--- Creative Analysis ---', ''],
