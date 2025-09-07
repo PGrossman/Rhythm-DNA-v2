@@ -41,7 +41,7 @@ const views = {
                 <label style="display: block; margin-bottom: 8px;">Database Folder</label>
                 <div style="display: flex; gap: 12px;">
                     <input type="text" id="db-folder" placeholder="/Users/grossph/Documents/Rhytham DNA" style="flex: 1; padding: 8px 12px; border: 1px solid #d0d0d0; border-radius: 4px;" readonly>
-                    <button id="choose-folder" style="padding: 8px 16px; background: #f0f0f0; border: 1px solid #d0d0d0; border-radius: 4px; cursor: pointer;">Choose...</button>
+                    <button id="choose-folder">Choose...</button>
                 </div>
             </div>
             <div style="margin-bottom: 16px;">
@@ -51,8 +51,8 @@ const views = {
                 </label>
             </div>
             <div style="display: flex; gap: 12px;">
-                <button id="update-database" style="padding: 8px 16px; background: #f0f0f0; border: 1px solid #d0d0d0; border-radius: 4px; cursor: pointer;">Update Database</button>
-                <button id="update-criteria" style="padding: 8px 16px; background: #f0f0f0; border: 1px solid #d0d0d0; border-radius: 4px; cursor: pointer;">Update Criteria DB</button>
+                <button id="update-database">Update Database</button>
+                <button id="update-criteria">Update Criteria DB</button>
             </div>
         </div>
         
