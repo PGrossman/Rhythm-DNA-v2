@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('api', {
     updateCriteriaDb: () => ipcRenderer.invoke('updateCriteriaDb'),
     runHealthCheck: () => ipcRenderer.invoke('runHealthCheck'),
     chooseFolder: () => ipcRenderer.invoke('chooseFolder'),
+    analyzeFile: (path) => ipcRenderer.invoke('analyzeFile', path),
 
     // Event listeners (Main → Renderer)
     onQueueUpdate: (callback) => ipcRenderer.on('queueUpdate', callback),

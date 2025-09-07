@@ -49,22 +49,14 @@ export class DragDrop {
         const paths = [];
         console.log('[DragDrop] Processing', items?.length || 0, 'dropped items');
         if (!items) return;
+        // Get real filesystem paths from File objects
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
             if (item.kind === 'file') {
-                const entry = item.webkitGetAsEntry?.();
-                if (entry) {
-                    if (entry.isFile) {
-                        const filePath = await this.getFilePath(entry);
-                        if (filePath) {
-                            paths.push(filePath);
-                            console.log('[DragDrop] Added file:', filePath);
-                        }
-                    } else if (entry.isDirectory) {
-                        const dirPaths = await this.scanDirectory(entry);
-                        paths.push(...dirPaths);
-                        console.log('[DragDrop] Added', dirPaths.length, 'files from directory');
-                    }
+                const file = item.getAsFile?.();
+                if (file && file.path) {
+                    paths.push(file.path);
+                    console.log('[DragDrop] Added file:', file.path);
                 }
             }
         }
@@ -77,40 +69,7 @@ export class DragDrop {
         }
     }
     
-    async getFilePath(fileEntry) {
-        return new Promise((resolve) => {
-            fileEntry.file((file) => {
-                const fullPath = file.webkitRelativePath || fileEntry.fullPath || file.name;
-                resolve(fullPath);
-            }, () => resolve(null));
-        });
-    }
-    
-    async scanDirectory(dirEntry) {
-        const paths = [];
-        const reader = dirEntry.createReader();
-        return new Promise((resolve) => {
-            const readEntries = () => {
-                reader.readEntries(async (entries) => {
-                    if (!entries || entries.length === 0) {
-                        resolve(paths);
-                        return;
-                    }
-                    for (const entry of entries) {
-                        if (entry.isFile) {
-                            const p = await this.getFilePath(entry);
-                            if (p) paths.push(p);
-                        } else if (entry.isDirectory) {
-                            const sub = await this.scanDirectory(entry);
-                            paths.push(...sub);
-                        }
-                    }
-                    readEntries();
-                }, () => resolve(paths));
-            };
-            readEntries();
-        });
-    }
+    // Directory scanning removed for now. Add recursive handling if needed.
 }
 
 

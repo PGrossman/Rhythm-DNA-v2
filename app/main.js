@@ -1,6 +1,8 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const fsPromises = require('node:fs/promises');
+const { analyzeMp3 } = require('./analysis/ffcalc.js');
 
 // App single instance lock
 if (!app.requestSingleInstanceLock()) {
@@ -14,6 +16,45 @@ let settings = {
     ollamaModel: 'qwen3:30b',
     techConcurrency: 4,
     creativeConcurrency: 2
+};
+
+// Helper function for directory scanning
+async function scanDirectory(dir) {
+    const results = [];
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+            results.push(...await scanDirectory(fullPath));
+        } else if (entry.isFile()) {
+            const ext = path.extname(entry.name).toLowerCase();
+            if (ext === '.mp3' || ext === '.wav') {
+                results.push(fullPath);
+            }
+        }
+    }
+    return results;
+}
+
+// Settings file path
+const getSettingsPath = () => path.join(app.getPath('userData'), 'settings.json');
+
+// Load settings from file
+const loadSettings = async () => {
+    try {
+        const data = await fsPromises.readFile(getSettingsPath(), 'utf8');
+        const loaded = JSON.parse(data);
+        settings = { ...settings, ...loaded };
+        console.log('[MAIN] Settings loaded from file:', settings);
+    } catch (err) {
+        console.log('[MAIN] No settings file found, using defaults');
+    }
+};
+
+// Save settings to file
+const saveSettings = async () => {
+    await fsPromises.writeFile(getSettingsPath(), JSON.stringify(settings, null, 2));
+    console.log('[MAIN] Settings saved to file');
 };
 
 const createWindow = () => {
@@ -33,14 +74,39 @@ const createWindow = () => {
     ipcMain.handle('scanDropped', async (event, { paths }) => {
         console.log('[MAIN] scanDropped:', paths.length, 'paths');
         const tracks = [];
+        const seen = new Set();
         for (const filePath of paths) {
-            const ext = path.extname(filePath).toLowerCase();
-            if (ext === '.mp3' || ext === '.wav') {
-                tracks.push({ 
-                    path: filePath, 
-                    fileName: path.basename(filePath), 
-                    status: 'QUEUED' 
-                });
+            try {
+                const stat = fs.statSync(filePath);
+                if (stat.isDirectory()) {
+                    const files = await scanDirectory(filePath);
+                    for (const file of files) {
+                        const basename = path.basename(file, path.extname(file)).toLowerCase();
+                        if (!seen.has(basename)) {
+                            seen.add(basename);
+                            tracks.push({
+                                path: file,
+                                fileName: path.basename(file),
+                                status: 'QUEUED'
+                            });
+                        }
+                    }
+                } else if (stat.isFile()) {
+                    const ext = path.extname(filePath).toLowerCase();
+                    if (ext === '.mp3' || ext === '.wav') {
+                        const basename = path.basename(filePath, ext).toLowerCase();
+                        if (!seen.has(basename)) {
+                            seen.add(basename);
+                            tracks.push({
+                                path: filePath,
+                                fileName: path.basename(filePath),
+                                status: 'QUEUED'
+                            });
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error('[MAIN] Error processing:', filePath, err);
             }
         }
         return { tracks };
@@ -54,6 +120,7 @@ const createWindow = () => {
     ipcMain.handle('updateSettings', async (event, newSettings) => {
         settings = { ...settings, ...newSettings };
         console.log('[MAIN] Settings updated:', settings);
+        await saveSettings();
         return { success: true };
     });
     
@@ -86,10 +153,25 @@ const createWindow = () => {
         console.log('[MAIN] clearQueue');
         return { cleared: true };
     });
+    
+    // FFmpeg analysis handler
+    ipcMain.handle('analyzeFile', async (event, filePath) => {
+        try {
+            console.log('[MAIN] Analyzing:', filePath);
+            const result = await analyzeMp3(filePath);
+            console.log('[MAIN] Analysis complete:', result.jsonPath);
+            return { success: true, ...result };
+        } catch (error) {
+            console.error('[MAIN] Analysis failed:', error);
+            return { success: false, error: error.message };
+        }
+    });
 };
 
 app.whenReady().then(() => {
-    createWindow();
+    loadSettings().then(() => {
+        createWindow();
+    });
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {

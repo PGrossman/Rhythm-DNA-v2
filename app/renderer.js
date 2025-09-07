@@ -35,6 +35,10 @@ const views = {
             <p>Drop audio folder here</p>
             <p class="subtitle">Supports MP3 and WAV files with recursive folder scanning</p>
         </div>
+        <div style="margin: 20px 0;">
+            <button id="start-analysis" style="padding: 10px 20px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer;">Start Analysis</button>
+            <button id="clear-queue" style="padding: 10px 20px; background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; margin-left: 10px;">Clear Queue</button>
+        </div>
         <div id="queue-display"></div>
     `,
     search: `
@@ -184,6 +188,7 @@ function setupAnalysisView() {
     if (dropZone) {
         dragDrop.setupDropZone(dropZone);
         
+        // Just add to queue on drop, don't process
         dropZone.addEventListener('filesDropped', (e) => {
             console.log('[Renderer] Files dropped:', e.detail.tracks.length);
             currentQueue = e.detail.tracks;
@@ -191,7 +196,52 @@ function setupAnalysisView() {
         });
     }
     
+    // Start Analysis button
+    const startBtn = document.getElementById('start-analysis');
+    if (startBtn) {
+        startBtn.addEventListener('click', async () => {
+            console.log('[Renderer] Start Analysis clicked');
+            await processQueue();
+        });
+    }
+    
+    // Clear Queue button
+    const clearBtn = document.getElementById('clear-queue');
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            console.log('[Renderer] Clear Queue clicked');
+            currentQueue = [];
+            updateQueueDisplay();
+        });
+    }
+    
     updateQueueDisplay();
+}
+
+async function processQueue() {
+    for (const track of currentQueue) {
+        if (track.path && track.path.toLowerCase().endsWith('.mp3')) {
+            try {
+                track.status = 'PROCESSING';
+                updateQueueDisplay();
+                
+                const result = await window.api.analyzeFile(track.path);
+                
+                if (result.success) {
+                    track.status = 'COMPLETE';
+                    track.techStatus = 'COMPLETE';
+                    console.log(`[Renderer] Analyzed: ${track.fileName}`);
+                } else {
+                    track.status = 'ERROR';
+                }
+                updateQueueDisplay();
+            } catch (error) {
+                console.error('[Renderer] Error:', error);
+                track.status = 'ERROR';
+                updateQueueDisplay();
+            }
+        }
+    }
 }
 
 function updateQueueDisplay() {
@@ -203,6 +253,12 @@ function updateQueueDisplay() {
         return;
     }
     
+    // Build the status display for each track
+    const getStatusBadge = (status) => {
+        const statusClass = status ? status.toLowerCase() : 'queued';
+        return `<span class="status-badge status-${statusClass}">${status || 'QUEUED'}</span>`;
+    };
+
     let html = `
         <h3>Files to Process (${currentQueue.length})</h3>
         <table class="queue-table">
@@ -211,6 +267,7 @@ function updateQueueDisplay() {
                     <th>File</th>
                     <th>Technical</th>
                     <th>Creative</th>
+                    <th>Status</th>
                 </tr>
             </thead>
             <tbody>
@@ -219,9 +276,10 @@ function updateQueueDisplay() {
     currentQueue.forEach(track => {
         html += `
             <tr>
-                <td>${track.fileName || track.filename || track.path}</td>
-                <td><span class="status-badge status-${(track.techStatus?.toLowerCase() || 'queued')}">${track.techStatus || 'QUEUED'}</span></td>
-                <td><span class="status-badge status-${(track.creativeStatus?.toLowerCase() || 'queued')}">${track.creativeStatus || 'QUEUED'}</span></td>
+                <td>${track.fileName || track.filename || 'Unknown'}</td>
+                <td>${getStatusBadge(track.techStatus || track.status)}</td>
+                <td>${getStatusBadge(track.creativeStatus || 'PENDING')}</td>
+                <td>${getStatusBadge(track.status)}</td>
             </tr>
         `;
     });
@@ -229,27 +287,30 @@ function updateQueueDisplay() {
     html += `
             </tbody>
         </table>
-        <div style="margin-top: 20px;">
-            <button id="start-analysis">Start Analysis</button>
-            <button id="clear-queue" class="secondary" style="margin-left: 12px;">Clear Queue</button>
-        </div>
     `;
     
     queueDiv.innerHTML = html;
-    
-    document.getElementById('start-analysis')?.addEventListener('click', async () => {
-        await window.api.startAnalysis({
-            concurrencyTech: 4,
-            concurrencyCreative: 2,
-            model: 'qwen3:8b'
-        });
-    });
-    
-    document.getElementById('clear-queue')?.addEventListener('click', () => {
-        currentQueue = [];
+}
+
+async function processTrack(track) {
+    try {
+        track.status = 'PROCESSING';
         updateQueueDisplay();
-        window.api.clearQueue();
-    });
+        const result = await window.api.analyzeFile(track.path);
+        if (result.success) {
+            track.status = 'COMPLETE';
+            track.techStatus = 'COMPLETE';
+            console.log(`[Renderer] Analysis complete: ${track.fileName || track.filename || track.path}`);
+        } else {
+            track.status = 'ERROR';
+            console.error(`[Renderer] Analysis failed: ${result.error}`);
+        }
+        updateQueueDisplay();
+    } catch (error) {
+        console.error('[Renderer] Process error:', error);
+        track.status = 'ERROR';
+        updateQueueDisplay();
+    }
 }
 
 // Listen for queue updates
