@@ -61,16 +61,36 @@ async function ffmpegLoudness(filePath) {
   const mLRA = /LRA:\s*(-?\d+(?:\.\d+)?)\s*LU/i.exec(stderr) || 
                /Loudness range:\s*(-?\d+(?:\.\d+)?)\s*LU/i.exec(stderr);
   
-  const mTP = /True peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS/i.exec(stderr) ||
-              /Peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS/i.exec(stderr) ||
-              /TP:\s*(-?\d+(?:\.\d+)?)\s*dBFS/i.exec(stderr);
+  // True peak is usually reported as dBTP (not dBFS). Support both, plus "TP:" variants.
+  const mTP = /True peak:\s*(-?\d+(?:\.\d+)?)\s*dBTP/i.exec(stderr) ||
+              /True peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS/i.exec(stderr) ||
+              /TP:\s*(-?\d+(?:\.\d+)?)\s*dB(?:TP|FS)/i.exec(stderr) ||
+              /Peak:\s*(-?\d+(?:\.\d+)?)\s*dB(?:TP|FS)/i.exec(stderr);
   
   console.log(`[LOUDNESS] Parsed - LUFS: ${mI?.[1]}, LRA: ${mLRA?.[1]}, True Peak: ${mTP?.[1]}`);
   
+  // If Integrated LUFS failed to parse, fall back to loudnorm measurement mode.
+  if (!mI) {
+    console.log('[LOUDNESS] ebur128 parsing failed, trying loudnorm fallback...');
+    const lnArgs = ['-hide_banner', '-nostats', '-i', filePath, '-af', 'loudnorm=print_format=json', '-f', 'null', '-'];
+    const ln = await run('ffmpeg', lnArgs, { collect: 'stderr' });
+    // loudnorm prints measured values as JSON-ish keys
+    // e.g. "input_i" : "-14.23", "input_tp" : "-0.30", "input_lra" : "5.10"
+    const iI   = /"input_i"\s*:\s*"(-?\d+(?:\.\d+)?)"/i.exec(ln);
+    const iTP  = /"input_tp"\s*:\s*"(-?\d+(?:\.\d+)?)"/i.exec(ln);
+    const iLRA = /"input_lra"\s*:\s*"(-?\d+(?:\.\d+)?)"/i.exec(ln);
+    console.log(`[LOUDNESS] loudnorm fallback - LUFS: ${iI?.[1]}, LRA: ${iLRA?.[1]}, TP: ${iTP?.[1]}`);
+    return {
+      lufs_integrated: iI ? Number(iI[1]) : null,
+      loudness_range:  iLRA ? Number(iLRA[1]) : null,
+      true_peak_db:    iTP ? Number(iTP[1]) : (mTP ? Number(mTP[1]) : null)
+    };
+  }
+  
   return {
-    lufs_integrated: mI ? Number(mI[1]) : null,
-    loudness_range: mLRA ? Number(mLRA[1]) : null,
-    true_peak_db: mTP ? Number(mTP[1]) : null
+    lufs_integrated: Number(mI[1]),
+    loudness_range:  mLRA ? Number(mLRA[1]) : null,
+    true_peak_db:    mTP ? Number(mTP[1]) : null
   };
 }
 
