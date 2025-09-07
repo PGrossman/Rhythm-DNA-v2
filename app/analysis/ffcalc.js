@@ -40,20 +40,32 @@ async function ffprobeJson(filePath) {
 }
 
 async function ffmpegLoudness(filePath) {
-  // Measure loudness on FULL track, original stereo, no resampling
+  // Measure EBU R128 loudness on FULL track, original stereo
   const args = [
     '-nostats', '-hide_banner', '-i', filePath,
     '-filter:a', 'ebur128=peak=true',
     '-f', 'null', '-'
   ];
+  
   const stderr = await run('ffmpeg', args, { collect: 'stderr' });
   
-  // Parse both old and new ffmpeg output formats
-  const mI = /(?:I:|Integrated loudness:)\s*(-?\d+(?:\.\d+)?)\s*LUFS/i.exec(stderr);
-  const mLRA = /(?:LRA:|Loudness range:)\s*(-?\d+(?:\.\d+)?)\s*LU/i.exec(stderr);
-  const mTP = /(?:True peak:|Peak:|TP:)\s*(-?\d+(?:\.\d+)?)\s*dB(?:TP|FS)?/i.exec(stderr);
+  // Debug: log the full stderr to see what we're getting
+  console.log('[LOUDNESS] Raw stderr (first 500 chars):', stderr.substring(0, 500));
   
-  console.log(`[Loudness] LUFS: ${mI?.[1]}, LRA: ${mLRA?.[1]}, True Peak: ${mTP?.[1]}`);
+  // Parse EBU R128 output - look for both formats
+  // Format 1: "I:         -14.2 LUFS"
+  // Format 2: "Integrated loudness: -14.2 LUFS"
+  const mI = /I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i.exec(stderr) || 
+             /Integrated loudness:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i.exec(stderr);
+  
+  const mLRA = /LRA:\s*(-?\d+(?:\.\d+)?)\s*LU/i.exec(stderr) || 
+               /Loudness range:\s*(-?\d+(?:\.\d+)?)\s*LU/i.exec(stderr);
+  
+  const mTP = /True peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS/i.exec(stderr) ||
+              /Peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS/i.exec(stderr) ||
+              /TP:\s*(-?\d+(?:\.\d+)?)\s*dBFS/i.exec(stderr);
+  
+  console.log(`[LOUDNESS] Parsed - LUFS: ${mI?.[1]}, LRA: ${mLRA?.[1]}, True Peak: ${mTP?.[1]}`);
   
   return {
     lufs_integrated: mI ? Number(mI[1]) : null,
@@ -128,29 +140,46 @@ async function estimateTempo(filePath) {
           autocorr[lag] = sum / (envelope.length - lag);
         }
         
-        // Find best lag in 60-200 BPM
+        // Find peaks in autocorrelation for different BPM ranges
         const sampleRate = 11025;
         const hopRate = sampleRate / hopSize;
-        const minLagBpm = Math.floor(hopRate * 60 / 200);
-        const maxLagBpm = Math.floor(hopRate * 60 / 60);
-        let bestLag = -1;
-        let bestValue = -Infinity;
-        for (let lag = Math.max(1, minLagBpm); lag <= maxLagBpm && lag < autocorr.length; lag++) {
-          const val = autocorr[lag];
-          if (val > bestValue) {
-            bestValue = val;
-            bestLag = lag;
+        
+        // Test multiple BPM ranges to avoid half/double time errors
+        const bpmRanges = [
+          { min: 60, max: 90 },   // Slow
+          { min: 90, max: 120 },  // Medium
+          { min: 120, max: 160 }, // Fast
+          { min: 160, max: 200 }  // Very fast
+        ];
+        
+        let bestBpm = null;
+        let bestScore = -Infinity;
+        
+        for (const range of bpmRanges) {
+          const minLag = Math.floor(hopRate * 60 / range.max);
+          const maxLag = Math.floor(hopRate * 60 / range.min);
+          
+          for (let lag = minLag; lag <= maxLag && lag < autocorr.length; lag++) {
+            const bpm = 60 * hopRate / lag;
+            const score = autocorr[lag];
+            
+            // Prefer BPMs in common ranges (80-160)
+            const commonBonus = (bpm >= 80 && bpm <= 160) ? 1.1 : 1.0;
+            const adjustedScore = score * commonBonus;
+            
+            if (adjustedScore > bestScore) {
+              bestScore = adjustedScore;
+              bestBpm = bpm;
+            }
           }
         }
-        if (bestLag <= 0) {
+        
+        if (!bestBpm) {
           resolve(null);
           return;
         }
-        let bpm = 60 * hopRate / bestLag;
-        // Octave correction into 80-200 BPM
-        while (bpm < 80) bpm *= 2;
-        while (bpm > 200) bpm /= 2;
-        const rounded = Math.round(bpm);
+        
+        const rounded = Math.round(bestBpm);
         console.log(`[BPM] Detected tempo: ${rounded} BPM`);
         resolve(rounded);
       });
