@@ -219,15 +219,38 @@ async function testOllamaCreative(baseName, bpm) {
   });
 }
 
-async function analyzeMp3(filePath) {
+async function analyzeMp3(filePath, win = null) {
+  const baseName = path.basename(filePath, path.extname(filePath));
+  // Send technical starting event
+  if (win) {
+    win.webContents.send('jobProgress', {
+      trackId: filePath,
+      stage: 'technical',
+      status: 'PROCESSING',
+      note: 'Running technical analysis...'
+    });
+  }
   const [probe, loudness, hasWav, tempo] = await Promise.all([
     ffprobeJson(filePath),
     ffmpegLoudness(filePath),
     checkWavExists(filePath),
     estimateTempo(filePath)
   ]);
-  
-  const baseName = path.basename(filePath, path.extname(filePath));
+  // Send technical complete, creative starting event
+  if (win) {
+    win.webContents.send('jobProgress', {
+      trackId: filePath,
+      stage: 'technical',
+      status: 'COMPLETE',
+      note: 'Technical analysis complete'
+    });
+    win.webContents.send('jobProgress', {
+      trackId: filePath,
+      stage: 'creative',
+      status: 'PROCESSING',
+      note: 'Starting creative analysis with Ollama...'
+    });
+  }
   const dir = path.dirname(filePath);
   
   // Test Ollama creative analysis (simple genre guess)
@@ -237,6 +260,15 @@ async function analyzeMp3(filePath) {
     : creativeGenre === 'Error'
     ? 'Creative analysis error'
     : `Creative analysis OK - Genre: ${creativeGenre}`;
+  // Send creative complete event
+  if (win) {
+    win.webContents.send('jobProgress', {
+      trackId: filePath,
+      stage: 'creative',
+      status: (creativeGenre === 'Offline' || creativeGenre === 'Error') ? 'ERROR' : 'COMPLETE',
+      note: creativeStatus
+    });
+  }
   
   const analysis = {
     file: path.basename(filePath),

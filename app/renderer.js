@@ -104,6 +104,7 @@ const views = {
 
 let currentView = 'analysis';
 let currentSettings = {};
+let progressStatus = {};
 
 async function setupSettingsView() {
     try {
@@ -223,6 +224,7 @@ async function processQueue() {
         if (track.path && track.path.toLowerCase().endsWith('.mp3')) {
             try {
                 track.status = 'PROCESSING';
+                track.techStatus = 'PROCESSING';
                 updateQueueDisplay();
                 
                 const result = await window.api.analyzeFile(track.path);
@@ -230,6 +232,7 @@ async function processQueue() {
                 if (result.success) {
                     track.status = 'COMPLETE';
                     track.techStatus = 'COMPLETE';
+                    track.creativeStatus = 'COMPLETE';
                     console.log(`[Renderer] Analyzed: ${track.fileName}`);
                 } else {
                     track.status = 'ERROR';
@@ -253,10 +256,20 @@ function updateQueueDisplay() {
         return;
     }
     
+    // Apply any progress updates received from main
+    currentQueue.forEach((track) => {
+        const p = progressStatus[track.path];
+        if (p) {
+            if (p.technical) track.techStatus = p.technical.status;
+            if (p.creative) track.creativeStatus = p.creative.status;
+        }
+    });
+
     // Build the status display for each track
     const getStatusBadge = (status) => {
         const statusClass = status ? status.toLowerCase() : 'queued';
-        return `<span class="status-badge status-${statusClass}">${status || 'QUEUED'}</span>`;
+        const label = status === 'PROCESSING' ? `⏳ ${status}` : (status || 'QUEUED');
+        return `<span class="status-badge status-${statusClass}">${label}</span>`;
     };
 
     let html = `
@@ -277,8 +290,8 @@ function updateQueueDisplay() {
         html += `
             <tr>
                 <td>${track.fileName || track.filename || 'Unknown'}</td>
-                <td>${getStatusBadge(track.techStatus || track.status)}</td>
-                <td>${getStatusBadge(track.creativeStatus || 'PENDING')}</td>
+                <td>${getStatusBadge(track.techStatus || 'QUEUED')}</td>
+                <td>${getStatusBadge(track.creativeStatus || 'WAITING')}</td>
                 <td>${getStatusBadge(track.status)}</td>
             </tr>
         `;
@@ -290,6 +303,20 @@ function updateQueueDisplay() {
     `;
     
     queueDiv.innerHTML = html;
+}
+
+// Listen for progress updates from main process
+if (window.api && window.api.onJobProgress) {
+    window.api.onJobProgress((event, data) => {
+        console.log('[Renderer] Progress update:', data);
+        if (!progressStatus[data.trackId]) progressStatus[data.trackId] = {};
+        if (data.stage === 'technical') {
+            progressStatus[data.trackId].technical = { status: data.status, note: data.note };
+        } else if (data.stage === 'creative') {
+            progressStatus[data.trackId].creative = { status: data.status, note: data.note };
+        }
+        updateQueueDisplay();
+    });
 }
 
 async function processTrack(track) {

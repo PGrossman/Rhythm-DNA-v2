@@ -158,7 +158,9 @@ const createWindow = () => {
     ipcMain.handle('analyzeFile', async (event, filePath) => {
         try {
             console.log('[MAIN] Analyzing:', filePath);
-            const result = await analyzeMp3(filePath);
+            // Pass the window to send progress events
+            const { analyzeMp3 } = require('./analysis/ffcalc.js');
+            const result = await analyzeMp3(filePath, win);
             console.log('[MAIN] Analysis complete:', result.jsonPath);
             return { success: true, ...result };
         } catch (error) {
