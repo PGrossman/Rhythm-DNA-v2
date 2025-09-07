@@ -102,11 +102,36 @@ async function ffmpegLoudness(filePath) {
 
 async function estimateTempo(filePath) {
   try {
-    // Extract 30 seconds of mono PCM from steady part (20-50s)
+    // Get file duration to choose appropriate analysis window
+    const meta = await ffprobeJson(filePath);
+    const dur = Number(meta?.duration_sec ?? 0) || 0;
+    
+    let start = 0, len = 0;
+    if (dur >= 32) {
+      // Long tracks: use stable middle section
+      start = 20; 
+      len = 30;
+    } else if (dur >= 12) {
+      // Medium tracks: centered window, 80% of duration (max 30s)
+      len = Math.min(30, Math.max(8, Math.floor(dur * 0.8)));
+      start = Math.max(0, Math.floor((dur - len) / 2));
+    } else if (dur >= 6) {
+      // Short tracks: analyze entire track
+      start = 0; 
+      len = Math.floor(dur);
+    } else {
+      // Too short for reliable BPM
+      console.log('[TEMPO] Track too short for BPM analysis:', dur, 'seconds');
+      return null;
+    }
+    
+    console.log(`[TEMPO] Analyzing window: ${start}s-${start+len}s of ${dur.toFixed(1)}s track`);
+    
+    // Extract mono PCM for the chosen window
     const args = [
       '-hide_banner', '-nostats',
-      '-ss', '20',
-      '-t', '30',
+      '-ss', String(start),
+      '-t', String(len),
       '-i', filePath,
       '-vn', '-ac', '1', '-ar', '11025',
       '-f', 's16le', '-'
@@ -119,11 +144,13 @@ async function estimateTempo(filePath) {
       cp.stdout.on('data', chunk => chunks.push(chunk));
       cp.on('close', (code) => {
         if (code !== 0) {
+          console.log('[TEMPO] FFmpeg extraction failed');
           resolve(null);
           return;
         }
         const buffer = Buffer.concat(chunks);
         if (!buffer.length) {
+          console.log('[TEMPO] No audio data extracted');
           resolve(null);
           return;
         }
@@ -151,6 +178,7 @@ async function estimateTempo(filePath) {
           prevEnergy = energy;
         }
         if (envelope.length < 4) {
+          console.log('[TEMPO] Envelope too short');
           resolve(null);
           return;
         }
@@ -165,7 +193,7 @@ async function estimateTempo(filePath) {
           autocorr[lag] = sum / (envelope.length - lag);
         }
         
-        // Candidate BPM bands (keep as-is)
+        // Candidate BPM bands
         const bpmRanges = [
           { min: 80,  max: 120 }, // Medium
           { min: 120, max: 160 }, // Fast
@@ -193,7 +221,7 @@ async function estimateTempo(filePath) {
           }
         }
         
-        // --- NEW: Resolve half/double-time by grid alignment on the envelope ---
+        // Resolve half/double-time by grid alignment on the envelope
         function resolveOctave(envelope, hopRate, bpm) {
           if (!bpm || !Number.isFinite(bpm)) return null;
           // Generate candidates within [80,200]
@@ -238,7 +266,7 @@ async function estimateTempo(filePath) {
         
         const resolved = resolveOctave(envelope, hopRate, bestBpm) ?? bestBpm ?? 120;
         const rounded = Math.round(resolved);
-        console.log('[TEMPO] Raw BPM:', bestBpm, '→ resolved:', resolved, '→ rounded:', rounded);
+        console.log(`[TEMPO] Window ${start}-${start+len}s, Raw BPM: ${bestBpm?.toFixed(1)}, Resolved: ${resolved?.toFixed(1)}, Final: ${rounded}`);
         resolve(rounded);
       });
       cp.on('error', () => resolve(null));
