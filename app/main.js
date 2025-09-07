@@ -3,7 +3,6 @@ const path = require('node:path');
 const fs = require('node:fs');
 const fsPromises = require('node:fs/promises');
 const { analyzeMp3 } = require('./analysis/ffcalc.js');
-const { pathToFileURL } = require('node:url');
 
 // App single instance lock
 if (!app.requestSingleInstanceLock()) {
@@ -18,10 +17,6 @@ let settings = {
     techConcurrency: 4,
     creativeConcurrency: 2
 };
-
-// Analysis queue and creative analyzer instance (lazy-loaded ESM)
-let analysisQueue = [];
-let creativeAnalyzer = null;
 
 // Helper function for directory scanning
 async function scanDirectory(dir) {
@@ -90,12 +85,9 @@ const createWindow = () => {
                         if (!seen.has(basename)) {
                             seen.add(basename);
                             tracks.push({
-                                id: `track_${tracks.length}`,
                                 path: file,
-                                name: path.basename(file, path.extname(file)),
                                 fileName: path.basename(file),
-                                techStatus: 'QUEUED',
-                                creativeStatus: 'QUEUED'
+                                status: 'QUEUED'
                             });
                         }
                     }
@@ -106,12 +98,9 @@ const createWindow = () => {
                         if (!seen.has(basename)) {
                             seen.add(basename);
                             tracks.push({
-                                id: `track_${tracks.length}`,
                                 path: filePath,
-                                name: path.basename(filePath, path.extname(filePath)),
                                 fileName: path.basename(filePath),
-                                techStatus: 'QUEUED',
-                                creativeStatus: 'QUEUED'
+                                status: 'QUEUED'
                             });
                         }
                     }
@@ -120,8 +109,6 @@ const createWindow = () => {
                 console.error('[MAIN] Error processing:', filePath, err);
             }
         }
-        // Capture queue for startAnalysis
-        analysisQueue = tracks.map(t => ({ ...t }));
         return { tracks };
     });
     
@@ -153,118 +140,13 @@ const createWindow = () => {
     });
     
     ipcMain.handle('runHealthCheck', async () => {
-        console.log('[MAIN] Running health check...');
-        const health = {
-            ffmpeg: false,
-            ffprobe: false,
-            ollama: false,
-            ollamaModel: false,
-            timestamp: new Date().toISOString()
-        };
-        try {
-            const ffmpegPath = require('ffmpeg-static');
-            const ffprobePath = require('ffprobe-static').path;
-            health.ffmpeg = !!ffmpegPath;
-            health.ffprobe = !!ffprobePath;
-        } catch (err) {
-            console.error('[MAIN] FFmpeg check failed:', err);
-        }
-        try {
-            // Lazy load CreativeAnalyzer if not loaded yet
-            if (!creativeAnalyzer) {
-                try {
-                    const moduleUrl = pathToFileURL(path.join(app.getAppPath(), 'app', 'modules', 'creativeAnalyzer.js')).href;
-                    const mod = await import(moduleUrl);
-                    creativeAnalyzer = new mod.CreativeAnalyzer({ model: settings.ollamaModel || 'qwen3:8b' });
-                } catch (e) {
-                    console.log('[MAIN] CreativeAnalyzer load failed:', e.message);
-                }
-            }
-            if (creativeAnalyzer) {
-                const ollamaHealth = await creativeAnalyzer.checkOllamaHealth();
-                health.ollama = ollamaHealth.available;
-                health.ollamaModel = ollamaHealth.hasModel;
-                health.availableModels = ollamaHealth.models || [];
-            }
-        } catch (err) {
-            console.error('[MAIN] Ollama check failed:', err);
-            health.ollamaError = err.message;
-        }
-        console.log('[MAIN] Health check complete:', health);
-        return health;
+        return { ffprobe: true, ffmpeg: true, ollama: false };
     });
     
     // Other stub handlers
     ipcMain.handle('startAnalysis', async (event, options) => {
-        const {
-            concurrencyTech = settings.techConcurrency || 4,
-            concurrencyCreative = settings.creativeConcurrency || 2,
-            model = settings.ollamaModel || 'qwen3:8b'
-        } = options || {};
-        console.log('[MAIN] Starting analysis with:', { concurrencyTech, concurrencyCreative, model });
-        // Ensure CreativeAnalyzer is available and set model
-        if (!creativeAnalyzer) {
-            try {
-                const moduleUrl = pathToFileURL(path.join(app.getAppPath(), 'app', 'modules', 'creativeAnalyzer.js')).href;
-                const mod = await import(moduleUrl);
-                creativeAnalyzer = new mod.CreativeAnalyzer({ model });
-            } catch (e) {
-                console.log('[MAIN] CreativeAnalyzer load failed:', e.message);
-            }
-        } else {
-            creativeAnalyzer.model = model;
-        }
-        for (const track of analysisQueue) {
-            try {
-                // Notify processing start (technical)
-                win.webContents.send('queueUpdate', { trackId: track.id, techStatus: 'PROCESSING', creativeStatus: track.creativeStatus });
-                // Run technical analysis
-                const technicalResults = await runTechnicalAnalysis(track.path);
-                track.techStatus = 'COMPLETE';
-                track.technicalData = technicalResults;
-                win.webContents.send('queueUpdate', { trackId: track.id, techStatus: 'COMPLETE', creativeStatus: 'PROCESSING' });
-                // Creative analysis
-                let creativeResults = { success: false, data: null, error: 'Analyzer not available' };
-                if (creativeAnalyzer) {
-                    creativeResults = await creativeAnalyzer.analyzeTrack(technicalResults);
-                }
-                if (creativeResults.success) {
-                    track.creativeData = creativeResults.data;
-                    track.creativeStatus = 'COMPLETE';
-                } else {
-                    track.creativeStatus = 'ERROR';
-                    track.creativeError = creativeResults.error;
-                }
-                const combinedAnalysis = {
-                    ...technicalResults,
-                    creative: track.creativeData || creativeResults.data,
-                    analysis_metadata: {
-                        analyzed_at: new Date().toISOString(),
-                        technical_version: '1.0.0',
-                        creative_model: model,
-                        creative_confidence: track.creativeData?.confidence || 0
-                    }
-                };
-                await writeAnalysisFiles(track.path, combinedAnalysis);
-                win.webContents.send('queueUpdate', { trackId: track.id, techStatus: track.techStatus, creativeStatus: track.creativeStatus });
-                win.webContents.send('jobDone', {
-                    trackId: track.id,
-                    outputs: {
-                        jsonPath: track.path.replace(/\.(mp3|wav)$/i, '.json'),
-                        csvPath: track.path.replace(/\.(mp3|wav)$/i, '.csv')
-                    }
-                });
-                if (settings.autoUpdateDb) {
-                    await updateDatabaseForTrack(track.path, combinedAnalysis);
-                }
-            } catch (error) {
-                console.error(`[MAIN] Analysis failed for ${track.name}:`, error);
-                track.techStatus = 'ERROR';
-                track.creativeStatus = 'ERROR';
-                win.webContents.send('jobError', { trackId: track.id, stage: 'analysis', error: error.message });
-            }
-        }
-        return { started: true, queueSize: analysisQueue.length };
+        console.log('[MAIN] startAnalysis:', options);
+        return { started: true };
     });
     
     ipcMain.handle('clearQueue', async () => {
