@@ -46,6 +46,17 @@ async function scanDirectory(dir) {
     return results;
 }
 
+// Check if analysis files exist for a given file
+function hasExistingAnalysis(filePath) {
+    const dir = path.dirname(filePath);
+    const ext = path.extname(filePath);
+    const baseName = path.basename(filePath, ext);
+    const jsonPath = path.join(dir, `${baseName}.rhythmdna.json`);
+    const csvPath = path.join(dir, `${baseName}.rhythmdna.csv`);
+    // Return true if either JSON or CSV exists
+    return fs.existsSync(jsonPath) || fs.existsSync(csvPath);
+}
+
 // Settings file path
 const getSettingsPath = () => path.join(app.getPath('userData'), 'settings.json');
 
@@ -94,10 +105,12 @@ const createWindow = () => {
                         const basename = path.basename(file, path.extname(file)).toLowerCase();
                         if (!seen.has(basename)) {
                             seen.add(basename);
+                            const hasAnalysis = hasExistingAnalysis(file);
                             tracks.push({
                                 path: file,
                                 fileName: path.basename(file),
-                                status: 'QUEUED'
+                                status: hasAnalysis ? 'RE-ANALYZE' : 'QUEUED',
+                                hasExistingAnalysis: hasAnalysis
                             });
                         }
                     }
@@ -107,10 +120,12 @@ const createWindow = () => {
                         const basename = path.basename(filePath, ext).toLowerCase();
                         if (!seen.has(basename)) {
                             seen.add(basename);
+                            const hasAnalysis = hasExistingAnalysis(filePath);
                             tracks.push({
                                 path: filePath,
                                 fileName: path.basename(filePath),
-                                status: 'QUEUED'
+                                status: hasAnalysis ? 'RE-ANALYZE' : 'QUEUED',
+                                hasExistingAnalysis: hasAnalysis
                             });
                         }
                     }

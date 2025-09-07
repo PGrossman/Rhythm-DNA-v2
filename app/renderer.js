@@ -9,6 +9,7 @@ const settingsStore = new SettingsStore();
 
 const panel = document.getElementById('panel');
 let currentQueue = [];
+let allowReanalyze = false;
 
 const views = {
     analysis: `
@@ -21,6 +22,10 @@ const views = {
         <div style="margin: 20px 0;">
             <button id="start-analysis" style="padding: 10px 20px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer;">Start Analysis</button>
             <button id="clear-queue" style="padding: 10px 20px; background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; margin-left: 10px;">Clear Queue</button>
+            <label style="margin-left: 20px; display: inline-flex; align-items: center; gap: 8px; font-size: 14px;">
+                <input type="checkbox" id="allow-reanalyze" style="width: 16px; height: 16px;">
+                <span>Re-analyze existing files</span>
+            </label>
         </div>
         <div id="queue-display"></div>
     `,
@@ -180,6 +185,18 @@ function setupAnalysisView() {
         });
     }
     
+    // Re-analyze checkbox
+    const reanalyzeCheckbox = document.getElementById('allow-reanalyze');
+    if (reanalyzeCheckbox) {
+        reanalyzeCheckbox.addEventListener('change', (e) => {
+            allowReanalyze = e.target.checked;
+            console.log('[Renderer] Re-analyze mode:', allowReanalyze);
+            updateQueueDisplay();
+        });
+        // Set initial state
+        allowReanalyze = reanalyzeCheckbox.checked;
+    }
+    
     // Start Analysis button
     const startBtn = document.getElementById('start-analysis');
     if (startBtn) {
@@ -213,14 +230,25 @@ async function processQueue() {
         track.path && track.path.toLowerCase().endsWith('.mp3')
     );
     
+    // Filter based on re-analyze checkbox
+    const tracksToProcess = mp3Tracks.filter(track => {
+        if (track.hasExistingAnalysis && !allowReanalyze) {
+            console.log(`[Renderer] Skipping ${track.fileName} - has existing analysis`);
+            return false;
+        }
+        return true;
+    });
+    
+    console.log(`[Renderer] Processing ${tracksToProcess.length} of ${mp3Tracks.length} tracks`);
+    
     // Worker pool: start work immediately when a worker becomes available
     let queueIndex = 0;
     
     const worker = async (workerId) => {
-        while (queueIndex < mp3Tracks.length) {
+        while (queueIndex < tracksToProcess.length) {
             const trackIndex = queueIndex++;
-            if (trackIndex >= mp3Tracks.length) break;
-            const track = mp3Tracks[trackIndex];
+            if (trackIndex >= tracksToProcess.length) break;
+            const track = tracksToProcess[trackIndex];
             console.log(`[Worker ${workerId}] Starting: ${track.fileName}`);
             try {
                 track.status = 'PROCESSING';
@@ -249,7 +277,7 @@ async function processQueue() {
     };
     
     const workers = [];
-    for (let i = 0; i < Math.min(concurrency, mp3Tracks.length); i++) {
+    for (let i = 0; i < Math.min(concurrency, tracksToProcess.length); i++) {
         workers.push(worker(i + 1));
     }
     await Promise.all(workers);
@@ -264,6 +292,10 @@ function updateQueueDisplay() {
         queueDiv.innerHTML = '';
         return;
     }
+    
+    // Count files with existing analysis
+    const existingCount = currentQueue.filter(t => t.hasExistingAnalysis).length;
+    const newCount = currentQueue.length - existingCount;
     
     // Apply any progress updates received from main
     currentQueue.forEach((track) => {
@@ -282,7 +314,8 @@ function updateQueueDisplay() {
     };
 
     let html = `
-        <h3>Files to Process (${currentQueue.length})</h3>
+        <h3>Files to Process (${currentQueue.length} total${existingCount > 0 ? ` - ${newCount} new, ${existingCount} existing` : ''})</h3>
+        ${existingCount > 0 && !allowReanalyze ? '<p style="color: #f59e0b; margin: 10px 0;">⚠️ Files with existing analysis will be skipped. Check "Re-analyze existing files" to process them.</p>' : ''}
         <table class="queue-table">
             <thead>
                 <tr>
@@ -296,12 +329,17 @@ function updateQueueDisplay() {
     `;
     
     currentQueue.forEach(track => {
+        const isSkipped = track.hasExistingAnalysis && !allowReanalyze;
+        const rowStyle = isSkipped ? 'style="opacity: 0.5;"' : '';
+        const displayStatus = track.hasExistingAnalysis ? 
+            (allowReanalyze ? 'RE-ANALYZE' : 'SKIP') : 
+            track.status;
         html += `
-            <tr>
+            <tr ${rowStyle}>
                 <td>${track.fileName || track.filename || 'Unknown'}</td>
-                <td>${getStatusBadge(track.techStatus || 'QUEUED')}</td>
-                <td>${getStatusBadge(track.creativeStatus || 'WAITING')}</td>
-                <td>${getStatusBadge(track.status)}</td>
+                <td>${getStatusBadge(isSkipped ? 'SKIP' : (track.techStatus || displayStatus))}</td>
+                <td>${getStatusBadge(isSkipped ? 'SKIP' : (track.creativeStatus || 'WAITING'))}</td>
+                <td>${getStatusBadge(displayStatus)}</td>
             </tr>
         `;
     });
