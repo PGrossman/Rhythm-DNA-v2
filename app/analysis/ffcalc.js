@@ -42,15 +42,27 @@ async function ffmpegLoudness(filePath) {
   // Measure loudness on FULL track, original stereo, no resampling
   const args = [
     '-nostats', '-hide_banner', '-i', filePath,
-    '-filter:a', 'ebur128=peak=true',
+    '-filter_complex', 'ebur128=peak=true',
     '-f', 'null', '-'
   ];
   const stderr = await run('ffmpeg', args, { collect: 'stderr' });
   
-  // Parse both old and new ffmpeg output formats
-  const mI = /(?:I:|Integrated loudness:)\s*(-?\d+(?:\.\d+)?)\s*LUFS/i.exec(stderr);
-  const mLRA = /(?:LRA:|Loudness range:)\s*(-?\d+(?:\.\d+)?)\s*LU/i.exec(stderr);
-  const mTP = /(?:True peak:|Peak:|TP:)\s*(-?\d+(?:\.\d+)?)\s*dB(?:TP|FS)?/i.exec(stderr);
+  // Debug tail of stderr to inspect parsing target
+  console.log('[Loudness] Raw stderr output:\n', stderr.slice(-500));
+  
+  // Prefer the Summary section if present
+  const summaryMatch = stderr.match(/Summary:[\s\S]*$/);
+  const searchText = summaryMatch ? summaryMatch[0] : stderr;
+  
+  // Flexible regex patterns for different ffmpeg versions
+  const mI = searchText.match(/I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i) ||
+             searchText.match(/Integrated loudness:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i);
+  const mLRA = searchText.match(/LRA:\s*(-?\d+(?:\.\d+)?)\s*LU/i) ||
+               searchText.match(/Loudness range:\s*(-?\d+(?:\.\d+)?)\s*LU/i);
+  const mTP = searchText.match(/True peak:\s*(-?\d+(?:\.\d+)?)\s*dBTP/i) ||
+              searchText.match(/Peak:\s*(-?\d+(?:\.\d+)?)\s*dBTP/i) ||
+              searchText.match(/True peak:\s*(-?\d+(?:\.\d+)?)\s*dB/i) ||
+              searchText.match(/TP:\s*(-?\d+(?:\.\d+)?)\s*dB/i);
   
   console.log(`[Loudness] LUFS: ${mI?.[1]}, LRA: ${mLRA?.[1]}, True Peak: ${mTP?.[1]}`);
   
