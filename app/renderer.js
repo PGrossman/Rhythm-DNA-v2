@@ -230,36 +230,47 @@ async function processQueue() {
         track.path && track.path.toLowerCase().endsWith('.mp3')
     );
     
-    // Per-track processor
-    const runTrack = async (track) => {
-        try {
-            track.status = 'PROCESSING';
-            track.techStatus = 'PROCESSING';
-            updateQueueDisplay();
-            
-            const result = await window.api.analyzeFile(track.path);
-            
-            if (result.success) {
-                track.status = 'COMPLETE';
-                track.techStatus = 'COMPLETE';
-                track.creativeStatus = 'COMPLETE';
-                console.log(`[Renderer] Analyzed: ${track.fileName}`);
-            } else {
+    // Worker pool: start work immediately when a worker becomes available
+    let queueIndex = 0;
+    
+    const worker = async (workerId) => {
+        while (queueIndex < mp3Tracks.length) {
+            const trackIndex = queueIndex++;
+            if (trackIndex >= mp3Tracks.length) break;
+            const track = mp3Tracks[trackIndex];
+            console.log(`[Worker ${workerId}] Starting: ${track.fileName}`);
+            try {
+                track.status = 'PROCESSING';
+                track.techStatus = 'PROCESSING';
+                updateQueueDisplay();
+                
+                const result = await window.api.analyzeFile(track.path);
+                
+                if (result.success) {
+                    track.status = 'COMPLETE';
+                    track.techStatus = 'COMPLETE';
+                    track.creativeStatus = 'COMPLETE';
+                    console.log(`[Worker ${workerId}] Complete: ${track.fileName}`);
+                } else {
+                    track.status = 'ERROR';
+                    console.error(`[Worker ${workerId}] Failed: ${track.fileName}`);
+                }
+                updateQueueDisplay();
+            } catch (error) {
+                console.error(`[Worker ${workerId}] Error:`, error);
                 track.status = 'ERROR';
+                updateQueueDisplay();
             }
-            updateQueueDisplay();
-        } catch (error) {
-            console.error('[Renderer] Error:', error);
-            track.status = 'ERROR';
-            updateQueueDisplay();
         }
+        console.log(`[Worker ${workerId}] No more files, shutting down`);
     };
     
-    // Process in parallel batches limited by concurrency
-    for (let i = 0; i < mp3Tracks.length; i += concurrency) {
-        const batch = mp3Tracks.slice(i, i + concurrency);
-        await Promise.all(batch.map(runTrack));
+    const workers = [];
+    for (let i = 0; i < Math.min(concurrency, mp3Tracks.length); i++) {
+        workers.push(worker(i + 1));
     }
+    await Promise.all(workers);
+    console.log('[Renderer] All files processed');
 }
 
 function updateQueueDisplay() {
