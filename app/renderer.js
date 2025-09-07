@@ -1,28 +1,11 @@
 // Basic three-tab UI controller; logs module init imports
 
 import { DragDrop } from './modules/dragdrop.js';
-import { QueueManager } from './modules/queue.js';
-import { TechAnalyzer } from './modules/techAnalyzer.js';
-import { CreativeAnalyzer } from './modules/creativeAnalyzer.js';
-import { Writers } from './modules/writers.js';
-import { DBWriter } from './modules/dbWriter.js';
-import { CriteriaDBBuilder } from './modules/criteriaDb.js';
 import { SettingsStore } from './modules/settings.js';
-import { Logger } from './modules/logger.js';
 
 // Instantiate modules to trigger init logs
 const dragDrop = new DragDrop();
-const modules = [
-    dragDrop,
-    new QueueManager(),
-    new TechAnalyzer(),
-    new CreativeAnalyzer(),
-    new Writers(),
-    new DBWriter(),
-    new CriteriaDBBuilder(),
-    new SettingsStore(),
-    new Logger()
-];
+const settingsStore = new SettingsStore();
 
 const panel = document.getElementById('panel');
 let currentQueue = [];
