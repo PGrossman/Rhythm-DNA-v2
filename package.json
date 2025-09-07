@@ -1,10 +1,11 @@
 {
     "name": "rhythmdna",
     "version": "1.0.0",
+    "type": "module",
     "main": "app/main.js",
     "scripts": {
-        "start": "npx electron-forge start",
-        "package": "npx electron-forge package"
+        "start": "electron-forge start",
+        "package": "electron-forge package"
     },
     "devDependencies": {
         "@electron-forge/cli": "^6.4.0",
