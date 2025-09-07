@@ -155,10 +155,9 @@ async function estimateTempo(filePath) {
           return;
         }
         
-        // Autocorrelation
-        const autocorrMaxLag = Math.floor(envelope.length / 2);
-        const autocorr = new Float32Array(autocorrMaxLag);
-        for (let lag = 1; lag < autocorrMaxLag; lag++) {
+        // Autocorrelation across candidate BPM ranges
+        const autocorr = new Array(envelope.length).fill(0);
+        for (let lag = 1; lag < envelope.length - 1; lag++) {
           let sum = 0;
           for (let i = 0; i < envelope.length - lag; i++) {
             sum += envelope[i] * envelope[i + lag];
@@ -166,33 +165,27 @@ async function estimateTempo(filePath) {
           autocorr[lag] = sum / (envelope.length - lag);
         }
         
-        // Find peaks in autocorrelation for different BPM ranges
-        const sampleRate = 11025;
-        const hopRate = sampleRate / hopSize;
-        
-        // Test multiple BPM ranges to avoid half/double time errors
+        // Candidate BPM bands (keep as-is)
         const bpmRanges = [
-          { min: 60, max: 90 },   // Slow
-          { min: 90, max: 120 },  // Medium
+          { min: 80,  max: 120 }, // Medium
           { min: 120, max: 160 }, // Fast
           { min: 160, max: 200 }  // Very fast
         ];
         
+        const sampleRate = 11025;
+        const hopRate = sampleRate / hopSize;
+        
         let bestBpm = null;
         let bestScore = -Infinity;
-        
         for (const range of bpmRanges) {
           const minLag = Math.floor(hopRate * 60 / range.max);
           const maxLag = Math.floor(hopRate * 60 / range.min);
-          
           for (let lag = minLag; lag <= maxLag && lag < autocorr.length; lag++) {
             const bpm = 60 * hopRate / lag;
             const score = autocorr[lag];
-            
-            // Prefer BPMs in common ranges (80-160)
+            // Light preference for common range
             const commonBonus = (bpm >= 80 && bpm <= 160) ? 1.1 : 1.0;
             const adjustedScore = score * commonBonus;
-            
             if (adjustedScore > bestScore) {
               bestScore = adjustedScore;
               bestBpm = bpm;
@@ -200,18 +193,58 @@ async function estimateTempo(filePath) {
           }
         }
         
-        if (!bestBpm) {
-          resolve(null);
-          return;
+        // --- NEW: Resolve half/double-time by grid alignment on the envelope ---
+        function resolveOctave(envelope, hopRate, bpm) {
+          if (!bpm || !Number.isFinite(bpm)) return null;
+          // Generate candidates within [80,200]
+          const raw = [bpm / 2, bpm, bpm * 2]
+            .filter(x => x >= 80 && x <= 200);
+          // De-duplicate rounded candidates
+          const seen = new Set(); 
+          const candidates = [];
+          for (const x of raw) {
+            const r = Math.round(x);
+            if (!seen.has(r)) { 
+              seen.add(r); 
+              candidates.push(x); 
+            }
+          }
+          let best = bpm, bestSum = -Infinity;
+          for (const cand of candidates) {
+            const interval = hopRate * (60 / cand); // frames between beats
+            if (!Number.isFinite(interval) || interval < 2) continue;
+            const beatsToCheck = Math.min(32, Math.floor(envelope.length / interval));
+            let localBest = -Infinity;
+            // Try a few phase offsets across one interval (8 steps)
+            for (let phaseStep = 0; phaseStep < 8; phaseStep++) {
+              const phase = (interval * phaseStep) / 8;
+              let sum = 0;
+              for (let k = 0; k < beatsToCheck; k++) {
+                const idx = Math.round(phase + k * interval);
+                if (idx >= 0 && idx < envelope.length) sum += envelope[idx];
+              }
+              if (sum > localBest) localBest = sum;
+            }
+            // Slight preference for 140–170 where many rock tracks sit
+            const preference = (cand >= 140 && cand <= 170) ? 1.05 : 1.0;
+            const score = localBest * preference;
+            if (score > bestSum) { 
+              bestSum = score; 
+              best = cand; 
+            }
+          }
+          return best;
         }
         
-        const rounded = Math.round(bestBpm);
-        console.log(`[BPM] Detected tempo: ${rounded} BPM`);
+        const resolved = resolveOctave(envelope, hopRate, bestBpm) ?? bestBpm ?? 120;
+        const rounded = Math.round(resolved);
+        console.log('[TEMPO] Raw BPM:', bestBpm, '→ resolved:', resolved, '→ rounded:', rounded);
         resolve(rounded);
       });
       cp.on('error', () => resolve(null));
     });
-  } catch {
+  } catch (e) {
+    console.error('[TEMPO] estimateTempo failed:', e);
     return null;
   }
 }
