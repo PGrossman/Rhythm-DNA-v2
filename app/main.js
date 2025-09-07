@@ -3,6 +3,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const fsPromises = require('node:fs/promises');
 const { analyzeMp3 } = require('./analysis/ffcalc.js');
+const DB = require('./db/jsondb.js');
 
 // App single instance lock
 if (!app.requestSingleInstanceLock()) {
@@ -17,6 +18,15 @@ let settings = {
     techConcurrency: 4,
     creativeConcurrency: 2
 };
+
+// DB paths helper
+let dbPaths = null;
+async function resolveDbPaths() {
+    dbPaths = await DB.getPaths({ 
+        dbFolder: settings.dbFolder, 
+        userData: app.getPath('userData') 
+    });
+}
 
 // Helper function for directory scanning
 async function scanDirectory(dir) {
@@ -121,6 +131,7 @@ const createWindow = () => {
         settings = { ...settings, ...newSettings };
         console.log('[MAIN] Settings updated:', settings);
         await saveSettings();
+        await resolveDbPaths();
         return { success: true };
     });
     
@@ -130,13 +141,27 @@ const createWindow = () => {
     });
     
     ipcMain.handle('updateDatabase', async () => {
-        console.log('[MAIN] Manual database update');
-        return { success: true };
+        try {
+            if (!dbPaths) await resolveDbPaths();
+            const summary = await DB.getSummary(dbPaths);
+            console.log('[MAIN] DB summary:', summary);
+            return { success: true, summary };
+        } catch (e) {
+            console.error('[MAIN] updateDatabase error:', e);
+            return { success: false, error: String(e) };
+        }
     });
     
     ipcMain.handle('updateCriteriaDb', async () => {
-        console.log('[MAIN] Update criteria DB');
-        return { success: true };
+        try {
+            if (!dbPaths) await resolveDbPaths();
+            const result = await DB.rebuildCriteria(dbPaths);
+            console.log('[MAIN] Criteria rebuilt:', result);
+            return { success: true, ...result };
+        } catch (e) {
+            console.error('[MAIN] updateCriteriaDb error:', e);
+            return { success: false, error: String(e) };
+        }
     });
     
     ipcMain.handle('runHealthCheck', async () => {
@@ -162,6 +187,19 @@ const createWindow = () => {
             const { analyzeMp3 } = require('./analysis/ffcalc.js');
             const result = await analyzeMp3(filePath, win);
             console.log('[MAIN] Analysis complete:', result.jsonPath);
+            
+            // Upsert into Main DB and optionally update criteria
+            try {
+                if (!dbPaths) await resolveDbPaths();
+                const dbResult = await DB.upsertTrack(dbPaths, result.analysis);
+                console.log('[MAIN] DB updated:', dbResult.key, 'Total tracks:', dbResult.total);
+                if (settings.autoUpdateDb) {
+                    const criteriaResult = await DB.rebuildCriteria(dbPaths);
+                    console.log('[MAIN] Criteria auto-updated:', criteriaResult.counts);
+                }
+            } catch (e) {
+                console.error('[MAIN] DB upsert failed:', e);
+            }
             return { success: true, ...result };
         } catch (error) {
             console.error('[MAIN] Analysis failed:', error);
@@ -173,6 +211,7 @@ const createWindow = () => {
 app.whenReady().then(() => {
     loadSettings().then(() => {
         createWindow();
+        resolveDbPaths();
     });
 
     app.on('activate', () => {
