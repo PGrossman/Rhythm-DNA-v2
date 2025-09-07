@@ -291,17 +291,253 @@ async function checkWavExists(mp3Path) {
 async function runCreativeAnalysis(baseName, bpm, loudness) {
   console.log('[CREATIVE] Running full creative analysis...');
   
-  // Envato taxonomy for validation
+  // Expanded Envato taxonomy with comprehensive instruments
   const ENVATO_TAXONOMY = {
     mood: ["Upbeat/Energetic", "Happy/Cheerful", "Inspiring/Uplifting", "Epic/Powerful", 
            "Dramatic/Emotional", "Chill/Mellow", "Funny/Quirky", "Angry/Aggressive"],
     genre: ["Cinematic", "Corporate", "Hip hop/Rap", "Rock", "Electronic", "Ambient", "Funk", "Classical"],
     theme: ["Corporate", "Documentary", "Action", "Lifestyle", "Sports", "Drama", "Nature", "Technology"],
-    instrument: ["Piano", "Acoustic Guitar", "Violin", "Bass", "Cello", "Drums", "Percussion", "Electric Guitar"],
+    instrument: [
+      // Keyboards
+      "Piano","Grand Piano","Upright Piano","Electric Piano (Rhodes)","Wurlitzer","Organ (Hammond)","Harpsichord","Clavinet","Celesta",
+      // Guitars
+      "Acoustic Guitar","12-String Acoustic","Nylon Guitar","Electric Guitar","Electric Guitar (clean)","Electric Guitar (crunch)","Electric Guitar (distorted)","Slide Guitar","Steel Guitar","Banjo","Mandolin","Ukulele",
+      // Bass
+      "Bass Guitar","Fretless Bass","Upright Bass","Synth Bass","Sub-bass","808 Bass",
+      // Drums & Percussion (Acoustic)
+      "Drum Kit (acoustic)","Kick","Snare","Hi-hat","Toms","Ride Cymbal","Crash Cymbal",
+      // Electronic Drums
+      "Drum Machine","808 Kick","808 Snare","Electronic Percussion",
+      // Hand Percussion
+      "Tambourine","Shaker","Clap","Snap","Cowbell","Woodblock","Triangle",
+      "Congas","Bongos","Djembe","Cajon","Timbales","Timpani","Taiko","Frame Drum","Tabla","Udu",
+      // Mallet Instruments
+      "Glockenspiel","Marimba","Xylophone","Vibraphone","Tubular Bells","Chimes","Handbells",
+      // Orchestral Strings
+      "Harp","Strings (section)","Violin","Viola","Cello","Double Bass",
+      // Brass
+      "Brass (section)","Trumpet","Trombone","French Horn","Tuba","Flugelhorn",
+      // Woodwinds
+      "Woodwinds (section)","Flute","Piccolo","Clarinet","Bass Clarinet","Oboe","English Horn","Bassoon",
+      "Saxophone (Alto)","Saxophone (Tenor)","Saxophone (Baritone)",
+      // Traditional/Folk
+      "Accordion","Harmonica",
+      // Synthesizers
+      "Synth Lead","Synth Pad","Synth Pluck","Arpeggiator","Sequence","Synth Brass","Synth Strings","FM Synth","Analog Synth","Modular Synth",
+      // World Instruments
+      "Kalimba (Mbira)","Steelpan (Steel Drum)","Duduk","Ocarina","Pan Flute","Recorder","Sitar","Koto","Shamisen","Erhu","Shakuhachi","Bagpipes","Tin Whistle",
+      // Other
+      "Bells/Chimes","Choir (as instrument)",
+      // Sound Design Elements (optional - can be included or separated)
+      "Riser","Uplifter","Downlifter","Whoosh","Impact","Hit","Boom","Sub Drop","Reverse","Swell","Braam","Sweep","Noise FX"
+    ],
     vocals: ["No Vocals", "Background Vocals", "Female Vocals", "Lead Vocals", "Vocal Samples", "Male Vocals"]
   };
   
-  // Build comprehensive prompt
+  // Synonym mapping for normalization
+  const INSTRUMENT_SYNONYMS = {
+    // Piano variations
+    "piano": "Piano",
+    "grand": "Grand Piano",
+    "upright": "Upright Piano",
+    "rhodes": "Electric Piano (Rhodes)",
+    "wurlie": "Wurlitzer",
+    "wurly": "Wurlitzer",
+    "hammond": "Organ (Hammond)",
+    "organ": "Organ (Hammond)",
+    "clav": "Clavinet",
+    
+    // Guitar variations
+    "ac gtr": "Acoustic Guitar",
+    "acoustic gtr": "Acoustic Guitar",
+    "acoustic": "Acoustic Guitar",
+    "12 string": "12-String Acoustic",
+    "12string": "12-String Acoustic",
+    "classical guitar": "Nylon Guitar",
+    "nylon": "Nylon Guitar",
+    "spanish guitar": "Nylon Guitar",
+    "elec gtr": "Electric Guitar",
+    "electric gtr": "Electric Guitar",
+    "e-guitar": "Electric Guitar",
+    "clean guitar": "Electric Guitar (clean)",
+    "crunch guitar": "Electric Guitar (crunch)",
+    "dist guitar": "Electric Guitar (distorted)",
+    "distorted guitar": "Electric Guitar (distorted)",
+    "slide": "Slide Guitar",
+    "pedal steel": "Steel Guitar",
+    "uke": "Ukulele",
+    "ukelele": "Ukulele",
+    
+    // Bass variations
+    "bass": "Bass Guitar",
+    "electric bass": "Bass Guitar",
+    "fretless": "Fretless Bass",
+    "double bass": "Upright Bass",
+    "upright": "Upright Bass",
+    "acoustic bass": "Upright Bass",
+    "sub": "Sub-bass",
+    "subbass": "Sub-bass",
+    "sub bass": "Sub-bass",
+    "synth bass": "Synth Bass",
+    "808": "808 Bass",
+    "808s": "808 Bass",
+    "808 bass": "808 Bass",
+    
+    // Drums variations
+    "drums": "Drum Kit (acoustic)",
+    "kit": "Drum Kit (acoustic)",
+    "drumkit": "Drum Kit (acoustic)",
+    "drum set": "Drum Kit (acoustic)",
+    "kick drum": "Kick",
+    "kick": "Kick",
+    "bass drum": "Kick",
+    "bd": "Kick",
+    "snare drum": "Snare",
+    "sn": "Snare",
+    "sd": "Snare",
+    "hihat": "Hi-hat",
+    "hi hat": "Hi-hat",
+    "hh": "Hi-hat",
+    "hats": "Hi-hat",
+    "claps": "Clap",
+    "handclap": "Clap",
+    "hand clap": "Clap",
+    "perc": "Electronic Percussion",
+    "percussion": "Electronic Percussion",
+    "909": "Drum Machine",
+    "tr909": "Drum Machine",
+    "tr808": "Drum Machine",
+    "808 drums": "Drum Machine",
+    
+    // Percussion variations
+    "toms": "Toms",
+    "tom": "Toms",
+    "ride": "Ride Cymbal",
+    "crash": "Crash Cymbal",
+    "conga": "Congas",
+    "bongo": "Bongos",
+    "tamb": "Tambourine",
+    "shakers": "Shaker",
+    "cow bell": "Cowbell",
+    
+    // Mallet variations
+    "glock": "Glockenspiel",
+    "vibes": "Vibraphone",
+    "vibe": "Vibraphone",
+    "tubular bells": "Tubular Bells",
+    "bells": "Bells/Chimes",
+    "bell": "Bells/Chimes",
+    
+    // Orchestra variations
+    "string section": "Strings (section)",
+    "strings": "Strings (section)",
+    "string ensemble": "Strings (section)",
+    "brass section": "Brass (section)",
+    "brass": "Brass (section)",
+    "horns": "Brass (section)",
+    "horn section": "Brass (section)",
+    "sax": "Saxophone (Alto)",
+    "alto sax": "Saxophone (Alto)",
+    "tenor sax": "Saxophone (Tenor)",
+    "bari sax": "Saxophone (Baritone)",
+    "woodwind": "Woodwinds (section)",
+    "woodwinds": "Woodwinds (section)",
+    
+    // Synth variations
+    "lead": "Synth Lead",
+    "lead synth": "Synth Lead",
+    "synth lead": "Synth Lead",
+    "pad": "Synth Pad",
+    "pads": "Synth Pad",
+    "synth pad": "Synth Pad",
+    "pluck": "Synth Pluck",
+    "plucks": "Synth Pluck",
+    "synth pluck": "Synth Pluck",
+    "arp": "Arpeggiator",
+    "arpeggio": "Arpeggiator",
+    "arps": "Arpeggiator",
+    "seq": "Sequence",
+    "sequencer": "Sequence",
+    "brass synth": "Synth Brass",
+    "synth brass": "Synth Brass",
+    "string pad": "Synth Strings",
+    "synth strings": "Synth Strings",
+    "fm": "FM Synth",
+    "fm synth": "FM Synth",
+    "analog": "Analog Synth",
+    "analogue": "Analog Synth",
+    "analog synth": "Analog Synth",
+    "modular": "Modular Synth",
+    "modular synth": "Modular Synth",
+    
+    // World instruments
+    "kalimba": "Kalimba (Mbira)",
+    "mbira": "Kalimba (Mbira)",
+    "steel drum": "Steelpan (Steel Drum)",
+    "steel drums": "Steelpan (Steel Drum)",
+    "steelpan": "Steelpan (Steel Drum)",
+    
+    // Sound Design
+    "riser": "Riser",
+    "risers": "Riser",
+    "uplift": "Uplifter",
+    "uplifter": "Uplifter",
+    "downlift": "Downlifter",
+    "downlifter": "Downlifter",
+    "swoosh": "Whoosh",
+    "woosh": "Whoosh",
+    "slam": "Impact",
+    "hit": "Hit",
+    "hits": "Hit",
+    "boom": "Boom",
+    "booms": "Boom",
+    "subdrop": "Sub Drop",
+    "sub drop": "Sub Drop",
+    "reverse cymbal": "Reverse",
+    "reverse": "Reverse",
+    "braams": "Braam",
+    "braam": "Braam",
+    "noise": "Noise FX",
+    "noise fx": "Noise FX"
+  };
+  
+  // Normalization function
+  function normalizeInstruments(list = []) {
+    const norm = s => String(s || "").trim().toLowerCase();
+    
+    // Build canonical set for validation
+    const canonicalSet = new Set(ENVATO_TAXONOMY.instrument.map(norm));
+    
+    const normalized = [];
+    for (const raw of list) {
+      if (!raw) continue;
+      
+      const key = norm(raw);
+      // First try synonym mapping
+      let mapped = INSTRUMENT_SYNONYMS[key];
+      
+      // If no synonym match, use original if it's in canonical set
+      if (!mapped) {
+        const found = ENVATO_TAXONOMY.instrument.find(i => norm(i) === key);
+        if (found) mapped = found;
+      }
+      
+      // Validate and add
+      if (mapped && canonicalSet.has(norm(mapped))) {
+        normalized.push(mapped);
+      }
+    }
+    
+    // De-duplicate while preserving order
+    const seen = new Set();
+    return normalized.filter(x => {
+      if (seen.has(x)) return false;
+      seen.add(x);
+      return true;
+    });
+  }
+  
+  // Build comprehensive prompt with expanded taxonomy
   const systemPrompt = `You are an expert music analyst. Analyze the track based on its metadata and categorize it using ONLY these specific values:
 
 MOOD options: ${ENVATO_TAXONOMY.mood.join(', ')}
@@ -315,20 +551,26 @@ Return ONLY a JSON object with this exact structure:
   "mood": ["1-3 moods from the list above"],
   "genre": ["1-2 genres from the list above"],
   "theme": ["1-2 themes from the list above"],
-  "instrument": ["detected instruments from the list above"],
+  "instrument": ["detected instruments from the list above - be comprehensive"],
   "vocals": ["vocal characteristics from the list above"],
   "narrative": "A 40-60 word description of the track's musical character and emotional impact",
   "confidence": 0.0-1.0
 }
 
-CRITICAL: Use ONLY the exact values from the lists provided. Return ONLY valid JSON, no other text.`;
+CRITICAL: 
+- Use ONLY the exact values from the lists provided
+- For instruments, be comprehensive and include all detected instruments
+- Common variations like "drums", "bass", "piano" should map to their proper names from the list
+- Include both primary and secondary instruments
+- If you detect synthesizers, specify the type (Synth Pad, Synth Lead, etc.)
+Return ONLY valid JSON, no other text.`;
 
   const userPrompt = `Analyze this track:
 Title: "${baseName}"
 Tempo: ${bpm || 'Unknown'} BPM
 Loudness: ${loudness || 'Unknown'} LUFS
 
-Based on the title and technical characteristics, provide your creative analysis.`;
+Based on the title and technical characteristics, provide your creative analysis. Be thorough in identifying instruments.`;
 
   const payload = JSON.stringify({
     model: 'qwen3:8b',
@@ -345,6 +587,7 @@ Based on the title and technical characteristics, provide your creative analysis
   });
 
   return new Promise((resolve) => {
+    const http = require('http');
     const req = http.request({
       hostname: '127.0.0.1',
       port: 11434,
@@ -371,18 +614,18 @@ Based on the title and technical characteristics, provide your creative analysis
           // Parse the JSON response
           const creative = JSON.parse(content);
           
-          // Validate against taxonomy
+          // Validate and normalize
           const validated = {
             mood: (creative.mood || []).filter(m => ENVATO_TAXONOMY.mood.includes(m)),
             genre: (creative.genre || []).filter(g => ENVATO_TAXONOMY.genre.includes(g)),
             theme: (creative.theme || []).filter(t => ENVATO_TAXONOMY.theme.includes(t)),
-            instrument: (creative.instrument || []).filter(i => ENVATO_TAXONOMY.instrument.includes(i)),
+            instrument: normalizeInstruments(creative.instrument || []), // Use normalizer
             vocals: (creative.vocals || []).filter(v => ENVATO_TAXONOMY.vocals.includes(v)),
             narrative: String(creative.narrative || 'No description available').slice(0, 200),
             confidence: Math.min(1, Math.max(0, Number(creative.confidence) || 0.5))
           };
           
-          console.log(`[CREATIVE] Analysis complete - Genre: ${validated.genre.join(', ')}, Mood: ${validated.mood.join(', ')}`);
+          console.log(`[CREATIVE] Analysis complete - Genre: ${validated.genre.join(', ')}, Mood: ${validated.mood.join(', ')}, Instruments: ${validated.instrument.slice(0, 5).join(', ')}${validated.instrument.length > 5 ? '...' : ''}`);
           resolve({ error: false, data: validated });
           
         } catch (e) {
