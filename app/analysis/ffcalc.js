@@ -2,6 +2,7 @@
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs').promises;
+const http = require('http');
 
 function run(bin, args, { collect = 'stdout' } = {}) {
   return new Promise((resolve, reject) => {
@@ -170,6 +171,54 @@ async function checkWavExists(mp3Path) {
   }
 }
 
+// Simple Ollama test function
+async function testOllamaCreative(baseName, bpm) {
+  console.log('[CREATIVE] Testing Ollama connection...');
+  const payload = JSON.stringify({
+    model: 'qwen3:8b',
+    messages: [
+      {
+        role: 'user',
+        content: `Given a song titled "${baseName}" with tempo ${bpm || 'unknown'} BPM, suggest ONE music genre in a single word. Reply with only the genre word, nothing else.`
+      }
+    ],
+    stream: false,
+    options: { temperature: 0.5 }
+  });
+  return new Promise((resolve) => {
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: 11434,
+      path: '/api/chat',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload)
+      }
+    }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          const genre = parsed.message?.content?.trim() || 'Unknown';
+          console.log(`[CREATIVE] Ollama responded with genre: ${genre}`);
+          resolve(genre);
+        } catch {
+          console.log('[CREATIVE] Failed to parse Ollama response');
+          resolve('Error');
+        }
+      });
+    });
+    req.on('error', (e) => {
+      console.log(`[CREATIVE] Ollama connection failed: ${e.message}`);
+      resolve('Offline');
+    });
+    req.write(payload);
+    req.end();
+  });
+}
+
 async function analyzeMp3(filePath) {
   const [probe, loudness, hasWav, tempo] = await Promise.all([
     ffprobeJson(filePath),
@@ -181,6 +230,14 @@ async function analyzeMp3(filePath) {
   const baseName = path.basename(filePath, path.extname(filePath));
   const dir = path.dirname(filePath);
   
+  // Test Ollama creative analysis (simple genre guess)
+  const creativeGenre = await testOllamaCreative(baseName, tempo);
+  const creativeStatus = creativeGenre === 'Offline'
+    ? 'Ollama offline - creative analysis skipped'
+    : creativeGenre === 'Error'
+    ? 'Creative analysis error'
+    : `Creative analysis OK - Genre: ${creativeGenre}`;
+  
   const analysis = {
     file: path.basename(filePath),
     path: filePath,
@@ -188,7 +245,9 @@ async function analyzeMp3(filePath) {
     has_wav_version: hasWav,
     ...probe,
     ...loudness,
-    estimated_tempo_bpm: tempo
+    estimated_tempo_bpm: tempo,
+    creative_test: creativeStatus,
+    creative_genre: creativeGenre
   };
   
   // Write JSON
@@ -215,11 +274,13 @@ async function analyzeMp3(filePath) {
     ['Channels', analysis.channels === 2 ? 'Stereo' : analysis.channels === 1 ? 'Mono' : analysis.channels || ''],
     ['Average Loudness (LUFS)', analysis.lufs_integrated || ''],
     ['Estimated Tempo (BPM)', analysis.estimated_tempo_bpm || ''],
-    ['Genre', ''],
-    ['Mood Tags', ''],
-    ['Instruments Detected', ''],
-    ['Lyric Themes', ''],
-    ['Narrative Description', '']
+    ['', ''],
+    ['--- Creative Analysis Test ---', ''],
+    ['Status', analysis.creative_test || 'Not run'],
+    ['Genre (Test)', analysis.creative_genre || ''],
+    ['Mood Tags', 'Coming soon'],
+    ['Instruments Detected', 'Coming soon'],
+    ['Narrative Description', 'Coming soon']
   ];
   
   const csvContent = csvRows
