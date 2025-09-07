@@ -171,20 +171,63 @@ async function checkWavExists(mp3Path) {
   }
 }
 
-// Simple Ollama test function
-async function testOllamaCreative(baseName, bpm) {
-  console.log('[CREATIVE] Testing Ollama connection...');
+// Full creative analysis with Envato taxonomy
+async function runCreativeAnalysis(baseName, bpm, loudness) {
+  console.log('[CREATIVE] Running full creative analysis...');
+  
+  // Envato taxonomy for validation
+  const ENVATO_TAXONOMY = {
+    mood: ["Upbeat/Energetic", "Happy/Cheerful", "Inspiring/Uplifting", "Epic/Powerful", 
+           "Dramatic/Emotional", "Chill/Mellow", "Funny/Quirky", "Angry/Aggressive"],
+    genre: ["Cinematic", "Corporate", "Hip hop/Rap", "Rock", "Electronic", "Ambient", "Funk", "Classical"],
+    theme: ["Corporate", "Documentary", "Action", "Lifestyle", "Sports", "Drama", "Nature", "Technology"],
+    instrument: ["Piano", "Acoustic Guitar", "Violin", "Bass", "Cello", "Drums", "Percussion", "Electric Guitar"],
+    vocals: ["No Vocals", "Background Vocals", "Female Vocals", "Lead Vocals", "Vocal Samples", "Male Vocals"]
+  };
+  
+  // Build comprehensive prompt
+  const systemPrompt = `You are an expert music analyst. Analyze the track based on its metadata and categorize it using ONLY these specific values:
+
+MOOD options: ${ENVATO_TAXONOMY.mood.join(', ')}
+GENRE options: ${ENVATO_TAXONOMY.genre.join(', ')}
+THEME options: ${ENVATO_TAXONOMY.theme.join(', ')}
+INSTRUMENT options: ${ENVATO_TAXONOMY.instrument.join(', ')}
+VOCALS options: ${ENVATO_TAXONOMY.vocals.join(', ')}
+
+Return ONLY a JSON object with this exact structure:
+{
+  "mood": ["1-3 moods from the list above"],
+  "genre": ["1-2 genres from the list above"],
+  "theme": ["1-2 themes from the list above"],
+  "instrument": ["detected instruments from the list above"],
+  "vocals": ["vocal characteristics from the list above"],
+  "narrative": "A 40-60 word description of the track's musical character and emotional impact",
+  "confidence": 0.0-1.0
+}
+
+CRITICAL: Use ONLY the exact values from the lists provided. Return ONLY valid JSON, no other text.`;
+
+  const userPrompt = `Analyze this track:
+Title: "${baseName}"
+Tempo: ${bpm || 'Unknown'} BPM
+Loudness: ${loudness || 'Unknown'} LUFS
+
+Based on the title and technical characteristics, provide your creative analysis.`;
+
   const payload = JSON.stringify({
     model: 'qwen3:8b',
     messages: [
-      {
-        role: 'user',
-        content: `Given a song titled "${baseName}" with tempo ${bpm || 'unknown'} BPM, suggest ONE music genre in a single word. Reply with only the genre word, nothing else.`
-      }
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
     ],
     stream: false,
-    options: { temperature: 0.5 }
+    format: 'json',
+    options: { 
+      temperature: 0.7,
+      top_p: 0.9
+    }
   });
+
   return new Promise((resolve) => {
     const req = http.request({
       hostname: '127.0.0.1',
@@ -201,22 +244,56 @@ async function testOllamaCreative(baseName, bpm) {
       res.on('end', () => {
         try {
           const parsed = JSON.parse(data);
-          const genre = parsed.message?.content?.trim() || 'Unknown';
-          console.log(`[CREATIVE] Ollama responded with genre: ${genre}`);
-          resolve(genre);
-        } catch {
-          console.log('[CREATIVE] Failed to parse Ollama response');
-          resolve('Error');
+          const content = parsed.message?.content;
+          
+          if (!content) {
+            console.log('[CREATIVE] No content in response');
+            resolve({ error: true, data: getDefaultCreative() });
+            return;
+          }
+          
+          // Parse the JSON response
+          const creative = JSON.parse(content);
+          
+          // Validate against taxonomy
+          const validated = {
+            mood: (creative.mood || []).filter(m => ENVATO_TAXONOMY.mood.includes(m)),
+            genre: (creative.genre || []).filter(g => ENVATO_TAXONOMY.genre.includes(g)),
+            theme: (creative.theme || []).filter(t => ENVATO_TAXONOMY.theme.includes(t)),
+            instrument: (creative.instrument || []).filter(i => ENVATO_TAXONOMY.instrument.includes(i)),
+            vocals: (creative.vocals || []).filter(v => ENVATO_TAXONOMY.vocals.includes(v)),
+            narrative: String(creative.narrative || 'No description available').slice(0, 200),
+            confidence: Math.min(1, Math.max(0, Number(creative.confidence) || 0.5))
+          };
+          
+          console.log(`[CREATIVE] Analysis complete - Genre: ${validated.genre.join(', ')}, Mood: ${validated.mood.join(', ')}`);
+          resolve({ error: false, data: validated });
+          
+        } catch (e) {
+          console.log('[CREATIVE] Failed to parse response:', e.message);
+          resolve({ error: true, data: getDefaultCreative() });
         }
       });
     });
     req.on('error', (e) => {
       console.log(`[CREATIVE] Ollama connection failed: ${e.message}`);
-      resolve('Offline');
+      resolve({ error: true, offline: true, data: getDefaultCreative() });
     });
     req.write(payload);
     req.end();
   });
+}
+
+function getDefaultCreative() {
+  return {
+    mood: [],
+    genre: [],
+    theme: [],
+    instrument: [],
+    vocals: [],
+    narrative: 'Creative analysis unavailable',
+    confidence: 0
+  };
 }
 
 async function analyzeMp3(filePath, win = null) {
@@ -253,19 +330,20 @@ async function analyzeMp3(filePath, win = null) {
   }
   const dir = path.dirname(filePath);
   
-  // Test Ollama creative analysis (simple genre guess)
-  const creativeGenre = await testOllamaCreative(baseName, tempo);
-  const creativeStatus = creativeGenre === 'Offline'
+  // Run full creative analysis
+  const creativeResult = await runCreativeAnalysis(baseName, tempo, loudness?.lufs_integrated);
+  const creative = creativeResult.data;
+  const creativeStatus = creativeResult.offline 
     ? 'Ollama offline - creative analysis skipped'
-    : creativeGenre === 'Error'
-    ? 'Creative analysis error'
-    : `Creative analysis OK - Genre: ${creativeGenre}`;
+    : creativeResult.error
+    ? 'Creative analysis error - using defaults'
+    : 'Creative analysis complete';
   // Send creative complete event
   if (win) {
     win.webContents.send('jobProgress', {
       trackId: filePath,
       stage: 'creative',
-      status: (creativeGenre === 'Offline' || creativeGenre === 'Error') ? 'ERROR' : 'COMPLETE',
+      status: creativeResult.error ? 'ERROR' : 'COMPLETE',
       note: creativeStatus
     });
   }
@@ -278,8 +356,8 @@ async function analyzeMp3(filePath, win = null) {
     ...probe,
     ...loudness,
     estimated_tempo_bpm: tempo,
-    creative_test: creativeStatus,
-    creative_genre: creativeGenre
+    creative: creative,
+    creative_status: creativeStatus
   };
   
   // Write JSON
@@ -307,12 +385,15 @@ async function analyzeMp3(filePath, win = null) {
     ['Average Loudness (LUFS)', analysis.lufs_integrated || ''],
     ['Estimated Tempo (BPM)', analysis.estimated_tempo_bpm || ''],
     ['', ''],
-    ['--- Creative Analysis Test ---', ''],
-    ['Status', analysis.creative_test || 'Not run'],
-    ['Genre (Test)', analysis.creative_genre || ''],
-    ['Mood Tags', 'Coming soon'],
-    ['Instruments Detected', 'Coming soon'],
-    ['Narrative Description', 'Coming soon']
+    ['--- Creative Analysis ---', ''],
+    ['Analysis Status', analysis.creative_status || ''],
+    ['Genre', (analysis.creative?.genre || []).join(', ')],
+    ['Mood', (analysis.creative?.mood || []).join(', ')],
+    ['Theme', (analysis.creative?.theme || []).join(', ')],
+    ['Instruments', (analysis.creative?.instrument || []).join(', ')],
+    ['Vocals', (analysis.creative?.vocals || []).join(', ')],
+    ['Description', analysis.creative?.narrative || ''],
+    ['Confidence', `${Math.round((analysis.creative?.confidence || 0) * 100)}%`]
   ];
   
   const csvContent = csvRows
