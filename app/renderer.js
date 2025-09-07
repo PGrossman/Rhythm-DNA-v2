@@ -220,30 +220,45 @@ function setupAnalysisView() {
 }
 
 async function processQueue() {
-    for (const track of currentQueue) {
-        if (track.path && track.path.toLowerCase().endsWith('.mp3')) {
-            try {
-                track.status = 'PROCESSING';
-                track.techStatus = 'PROCESSING';
-                updateQueueDisplay();
-                
-                const result = await window.api.analyzeFile(track.path);
-                
-                if (result.success) {
-                    track.status = 'COMPLETE';
-                    track.techStatus = 'COMPLETE';
-                    track.creativeStatus = 'COMPLETE';
-                    console.log(`[Renderer] Analyzed: ${track.fileName}`);
-                } else {
-                    track.status = 'ERROR';
-                }
-                updateQueueDisplay();
-            } catch (error) {
-                console.error('[Renderer] Error:', error);
+    // Get concurrency setting (default to 4 if not set)
+    const settings = await window.api.getSettings();
+    const concurrency = settings.techConcurrency || 4;
+    console.log(`[Renderer] Processing queue with concurrency: ${concurrency}`);
+    
+    // Filter to MP3 files only
+    const mp3Tracks = currentQueue.filter(track => 
+        track.path && track.path.toLowerCase().endsWith('.mp3')
+    );
+    
+    // Per-track processor
+    const runTrack = async (track) => {
+        try {
+            track.status = 'PROCESSING';
+            track.techStatus = 'PROCESSING';
+            updateQueueDisplay();
+            
+            const result = await window.api.analyzeFile(track.path);
+            
+            if (result.success) {
+                track.status = 'COMPLETE';
+                track.techStatus = 'COMPLETE';
+                track.creativeStatus = 'COMPLETE';
+                console.log(`[Renderer] Analyzed: ${track.fileName}`);
+            } else {
                 track.status = 'ERROR';
-                updateQueueDisplay();
             }
+            updateQueueDisplay();
+        } catch (error) {
+            console.error('[Renderer] Error:', error);
+            track.status = 'ERROR';
+            updateQueueDisplay();
         }
+    };
+    
+    // Process in parallel batches limited by concurrency
+    for (let i = 0; i < mp3Tracks.length; i += concurrency) {
+        const batch = mp3Tracks.slice(i, i + concurrency);
+        await Promise.all(batch.map(runTrack));
     }
 }
 
