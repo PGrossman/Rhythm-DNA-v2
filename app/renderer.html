@@ -250,6 +250,76 @@
         background: #f8d7da;
         color: #721c24;
       }
+
+      /* Settings buttons visibility and styling fixes */
+      #choose-folder {
+        background-color: #6b7280;
+        color: white;
+        border: 1px solid #4b5563;
+        padding: 8px 16px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 14px;
+        transition: background-color 0.2s;
+      }
+
+      #choose-folder:hover {
+        background-color: #4b5563;
+      }
+
+      #update-database {
+        background-color: #3b82f6;
+        color: white;
+        border: none;
+        padding: 8px 16px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 14px;
+        transition: background-color 0.2s;
+      }
+
+      #update-database:hover {
+        background-color: #2563eb;
+      }
+
+      #update-criteria {
+        background-color: #3b82f6;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+        transition: background-color 0.2s;
+      }
+
+      #update-criteria:hover {
+        background-color: #2563eb;
+      }
+
+      /* Ensure secondary buttons render visibly if used */
+      button.secondary {
+        background-color: #6b7280 !important;
+        color: white !important;
+        border: 1px solid #4b5563 !important;
+      }
+
+      button.secondary:hover {
+        background-color: #4b5563 !important;
+      }
+
+      /* Ensure all settings buttons are visible and consistent */
+      .settings-group button {
+        min-height: 36px;
+        font-weight: 500;
+      }
+
+      /* Disabled button state */
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
     </style>
   </head>
   <body>
