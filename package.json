@@ -5,7 +5,8 @@
     "scripts": {
         "start": "npx electron-forge start",
         "package": "npx electron-forge package",
-        "install-models": "node scripts/install-models.js"
+        "install-models": "node scripts/install-models.js",
+        "setup-yamnet": "node scripts/setup-yamnet.js"
     },
     "devDependencies": {
         "@electron-forge/cli": "^6.4.0",
