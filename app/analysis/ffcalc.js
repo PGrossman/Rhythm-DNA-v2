@@ -777,6 +777,7 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
     if (durationSec > 5) {
       console.log('[AUDIO_PROBE] Starting analysis for', baseName);
       probes = await runAudioProbes(filePath, durationSec, baseName);
+      console.log('[AUDIO_PROBE] Hints merged:', probes.hints);
       if (probes.status === 'ok' && probes.hints) {
         const detected = Object.entries(probes.hints)
           .filter(([k, v]) => v)

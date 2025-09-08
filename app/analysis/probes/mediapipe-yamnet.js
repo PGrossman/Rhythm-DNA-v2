@@ -65,15 +65,15 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 		
 		const input = await ffmpegDecodeToTensor(filePath, start, winSec, 16000);
 		const results = await pipe(input);
-		const top = results.slice(0, 20);
+		const top = results.slice(0, 25);
 		
 		const s = (n) => scoreOf(top, n);
 		const hints = {
 			vocals: Math.max(s('Vocal music'), s('Singing'), s('Speech')) >= 0.15,
-			brass: Math.max(s('Brass instrument'), s('Trumpet'), s('Trombone'), s('Saxophone')) >= 0.12,
-			trumpet: s('Trumpet') >= 0.10,
-			trombone: s('Trombone') >= 0.08,
-			saxophone: s('Saxophone') >= 0.12,
+			brass: Math.max(s('Brass instrument'), s('Trumpet'), s('Trombone'), s('Saxophone')) >= 0.10,
+			trumpet: s('Trumpet') >= 0.08,
+			trombone: s('Trombone') >= 0.06,
+			saxophone: s('Saxophone') >= 0.10,
 			drumkit: Math.max(s('Drum kit'), s('Drum'), s('Snare drum')) >= 0.14,
 			guitar: Math.max(s('Electric guitar'), s('Acoustic guitar')) >= 0.14,
 			piano: s('Piano') >= 0.14

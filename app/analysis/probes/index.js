@@ -1,6 +1,6 @@
 'use strict';
 
-const { probeYamnet, probeYamnetRange } = require('./mediapipe-yamnet.js');
+const { probeYamnet } = require('./mediapipe-yamnet.js');
 // const { probeZeroShot } = require('./transformers-zero-shot.js'); // Disabled until zero-shot-audio model available
 
 const ZS_LABELS = [
@@ -30,15 +30,15 @@ function orHints(a = {}, b = {}) {
 
 
 async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
-	// Three-window strategy: Intro (0-30s), Middle (50%), Outro (70%)
-	const introLen = Math.min(30, durationSec / 3);
+	// Three-window strategy: Intro (20-30s), Middle (50%), Outro (70%)
+	const introLen = Math.min(30, Math.max(20, durationSec / 3));
 
 	let intro = { status: 'skipped' };
 	try {
 		intro = await withTimeout(
-			probeYamnetRange(filePath, 0, introLen),
-			4000,
-			'yamnet-intro'
+			probeYamnet(filePath, durationSec, { winSec: introLen, centerFrac: 0.08 }),
+			15000,
+			'ast-intro'
 		);
 		console.log('[PROBE] Intro labels:', intro.labels?.slice(0, 5));
 	} catch (e) {
@@ -48,9 +48,9 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 	let middle = { status: 'skipped' };
 	try {
 		middle = await withTimeout(
-			probeYamnet(filePath, durationSec, { winSec: 5, centerFrac: 0.50 }),
-			3000,
-			'yamnet-middle'
+			probeYamnet(filePath, durationSec, { winSec: 6, centerFrac: 0.50 }),
+			12000,
+			'ast-middle'
 		);
 	} catch (e) {
 		middle = { status: 'skipped', error: String(e.message || e) };
@@ -59,9 +59,9 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 	let outro = { status: 'skipped' };
 	try {
 		outro = await withTimeout(
-			probeYamnet(filePath, durationSec, { winSec: 5, centerFrac: 0.70 }),
-			3000,
-			'yamnet-outro'
+			probeYamnet(filePath, durationSec, { winSec: 6, centerFrac: 0.70 }),
+			12000,
+			'ast-outro'
 		);
 	} catch (e) {
 		outro = { status: 'skipped', error: String(e.message || e) };
