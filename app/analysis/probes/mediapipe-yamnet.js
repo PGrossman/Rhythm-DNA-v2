@@ -1,20 +1,29 @@
 'use strict';
 
+// Node-friendly YAMNet probe via @xenova/transformers (no DOM required)
 const { spawn } = require('node:child_process');
+let yamnetPipe = null;
 
-// Dynamic import for MediaPipe (ESM module)
-async function loadMediaPipe() {
-	const { FilesetResolver, AudioClassifier } = await import('@mediapipe/tasks-audio');
-	return { FilesetResolver, AudioClassifier };
+async function ensureYamnet() {
+	if (yamnetPipe) return yamnetPipe;
+	try {
+		const { pipeline } = await import('@xenova/transformers');
+		yamnetPipe = await pipeline('audio-classification', 'Xenova/yamnet');
+		console.log('[YAMNET] Pipeline loaded successfully');
+		return yamnetPipe;
+	} catch (e) {
+		console.log('[YAMNET] Failed to load pipeline:', e.message);
+		return null;
+	}
 }
 
-function ffmpegDecodeToF32(filePath, startSec, durSec) {
+function ffmpegDecodeToTensor(filePath, startSec, durSec, sr = 16000) {
 	return new Promise((resolve, reject) => {
 		const args = [
 			'-ss', String(startSec),
 			'-t', String(durSec),
 			'-i', filePath,
-			'-ac', '1', '-ar', '16000',
+			'-ac', '1', '-ar', String(sr),
 			'-f', 'f32le',
 			'-hide_banner', '-loglevel', 'error',
 			'pipe:1'
@@ -27,93 +36,58 @@ function ffmpegDecodeToF32(filePath, startSec, durSec) {
 		p.on('close', (code) => {
 			if (code !== 0) return reject(new Error(err.trim() || 'ffmpeg failed'));
 			const buf = Buffer.concat(chunks);
-			resolve(new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4));
+			const f32 = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+			resolve({ array: f32, sampling_rate: sr });
 		});
 	});
 }
 
-function pick(haystack, ...needles) {
-	const set = new Set(haystack.map(s => String(s).toLowerCase()));
-	return needles.some(n => set.has(String(n).toLowerCase()));
+function scoreOf(list, name) {
+	const n = String(name).toLowerCase();
+	return list.find(x => String(x.label).toLowerCase() === n)?.score ?? 0;
 }
 
 async function probeYamnet(filePath, durationSec, opts = {}) {
+	const winSec = opts.winSec ?? 6;
+	const centerFrac = opts.centerFrac ?? 0.35;
+	const anchorSec = opts.anchorSec;
+	
+	const center = (anchorSec != null)
+		? Math.max(0, Math.min(durationSec, anchorSec))
+		: Math.max(0, Math.min(durationSec, centerFrac * durationSec));
+	const start = Math.max(0, Math.min(durationSec - winSec, center - winSec / 2));
+	
 	try {
-		const winSec = opts.winSec ?? 5;
-		const centerFrac = opts.centerFrac ?? 0.35;
-		const start = Math.max(0, Math.min(Math.max(0, durationSec - winSec), durationSec * centerFrac - winSec / 2));
-
-		// Load MediaPipe dynamically
-		const { FilesetResolver, AudioClassifier } = await loadMediaPipe();
-		// Load WASM runtime + YAMNet model
-		const fileset = await FilesetResolver.forAudioTasks(
-			'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-audio/wasm'
-		);
-		const classifier = await AudioClassifier.createFromModelPath(
-			fileset,
-			'https://storage.googleapis.com/mediapipe-models/audio_classifier/yamnet/float32/1/yamnet.tflite'
-		);
-
-		const pcm = await ffmpegDecodeToF32(filePath, start, winSec);
-		// Pass explicit sample rate to avoid resampling issues
-		const result = await classifier.classify(pcm, 16000);
-		const cats = (result?.classifications?.[0]?.categories || [])
-						.filter(c => (c.score ?? 0) >= 0.12)
-						.map(c => c.categoryName);
-
+		const pipe = await ensureYamnet();
+		if (!pipe) return { status: 'skipped', error: 'Pipeline unavailable' };
+		
+		const input = await ffmpegDecodeToTensor(filePath, start, winSec, 16000);
+		const results = await pipe(input);
+		const top = results.slice(0, 20);
+		
+		const s = (n) => scoreOf(top, n);
 		const hints = {
-			vocals:    pick(cats, 'vocal music', 'singing', 'speech', 'singer', 'choir'),
-			choir:     pick(cats, 'choir'),
-			brass:     pick(cats, 'brass instrument', 'horn', 'saxophone', 'trumpet', 'trombone'),
-			trumpet:   pick(cats, 'trumpet'),
-			trombone:  pick(cats, 'trombone'),
-			saxophone: pick(cats, 'saxophone'),
-			drumkit:   pick(cats, 'drum', 'drum kit', 'snare drum', 'cymbal'),
-			guitar:    pick(cats, 'electric guitar', 'acoustic guitar', 'guitar'),
-			piano:     pick(cats, 'piano', 'keyboard')
+			vocals: Math.max(s('Vocal music'), s('Singing'), s('Speech')) >= 0.15,
+			brass: Math.max(s('Brass instrument'), s('Trumpet'), s('Trombone'), s('Saxophone')) >= 0.12,
+			trumpet: s('Trumpet') >= 0.10,
+			trombone: s('Trombone') >= 0.08,
+			saxophone: s('Saxophone') >= 0.12,
+			drumkit: Math.max(s('Drum kit'), s('Drum'), s('Snare drum')) >= 0.14,
+			guitar: Math.max(s('Electric guitar'), s('Acoustic guitar')) >= 0.14,
+			piano: s('Piano') >= 0.14
 		};
-
-		return { status: 'ok', hints, labels: cats, meta: { startSec: start, winSec } };
+		
+		return {
+			status: 'ok',
+			hints,
+			labels: top.map(x => x.label),
+			scores: top,
+			meta: { startSec: start, winSec }
+		};
 	} catch (e) {
 		console.log('[YAMNET] Error:', e.message);
 		return { status: 'skipped', error: e.message };
 	}
 }
 
-// Probe a specific [start, start+dur] window for early/intro analysis
-async function probeYamnetRange(filePath, startSec, durSec) {
-    try {
-        const { FilesetResolver, AudioClassifier } = await loadMediaPipe();
-        const fileset = await FilesetResolver.forAudioTasks(
-            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-audio/wasm'
-        );
-        const classifier = await AudioClassifier.createFromModelPath(
-            fileset,
-            'https://storage.googleapis.com/mediapipe-models/audio_classifier/yamnet/float32/1/yamnet.tflite'
-        );
-        const pcm = await ffmpegDecodeToF32(filePath, startSec, durSec);
-        const result = await classifier.classify(pcm, 16000);
-        const cats = (result?.classifications?.[0]?.categories || [])
-                        .filter(c => (c.score ?? 0) >= 0.10)
-                        .map(c => c.categoryName);
-        const hints = {
-            vocals:    pick(cats, 'vocal music', 'singing', 'speech', 'singer', 'choir'),
-            choir:     pick(cats, 'choir'),
-            brass:     pick(cats, 'brass instrument', 'horn', 'saxophone', 'trumpet', 'trombone'),
-            trumpet:   pick(cats, 'trumpet'),
-            trombone:  pick(cats, 'trombone'),
-            saxophone: pick(cats, 'saxophone'),
-            drumkit:   pick(cats, 'drum', 'drum kit', 'snare drum', 'cymbal'),
-            guitar:    pick(cats, 'electric guitar', 'acoustic guitar', 'guitar'),
-            piano:     pick(cats, 'piano', 'keyboard')
-        };
-        return { status: 'ok', hints, labels: cats, meta: { startSec, winSec: durSec } };
-    } catch (e) {
-        console.log('[YAMNET-RANGE] Error:', e.message);
-        return { status: 'skipped', error: e.message };
-    }
-}
-
-module.exports = { probeYamnet, probeYamnetRange };
-
-
+module.exports = { probeYamnet };
