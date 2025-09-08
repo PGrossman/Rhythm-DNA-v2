@@ -69,7 +69,7 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 		if (!pipe) return { status: 'skipped', error: 'Pipeline unavailable' };
 		
 		const input = await ffmpegDecodeToTensor(filePath, start, winSec, 16000);
-		const results = await pipe(input);
+		const results = await pipe(input.array, { sampling_rate: input.sampling_rate });
 		const top = results.slice(0, 25);
 		
 		const s = (n) => scoreOf(top, n);
