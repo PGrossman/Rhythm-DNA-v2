@@ -3,6 +3,7 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs').promises;
 const http = require('http');
+const { runAudioProbes } = require('./probes/index.js');
 
 function run(bin, args, { collect = 'stdout' } = {}) {
   return new Promise((resolve, reject) => {
@@ -259,7 +260,7 @@ async function checkOllamaModel(model) {
 }
 
 // Full creative analysis with Envato taxonomy
-async function runCreativeAnalysis(baseName, bpm, model = 'qwen3:8b') {
+async function runCreativeAnalysis(baseName, bpm, model = 'qwen3:8b', audioHints = null) {
   console.log('[CREATIVE] Running full creative analysis...');
   
   // Check if model is installed
@@ -582,7 +583,11 @@ Return ONLY valid JSON, no other text.`;
   const userPrompt = `Analyze this track:
 Title: "${baseName}"
 Tempo: ${bpm || 'Unknown'} BPM
-
+${audioHints ? `
+Audio analysis detected these elements (from actual audio):
+${Object.entries(audioHints).filter(([k,v]) => v).map(([k]) => k).join(', ')}
+Please include these in your analysis where appropriate.
+` : ''}
 Based on the title and technical characteristics, provide your creative analysis. Be thorough in identifying instruments.`;
 
   // Use the model passed from settings, with lower temperature for advanced models
@@ -766,7 +771,7 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
   const dir = path.dirname(filePath);
   
   // Run full creative analysis
-  const creativeResult = await runCreativeAnalysis(baseName, tempo, model);
+  const creativeResult = await runCreativeAnalysis(baseName, tempo, model, (typeof probes !== 'undefined' && probes.hints) ? probes.hints : null);
   const creative = creativeResult.data;
   const creativeStatus = creativeResult.modelMissing
     ? `Model '${model}' not installed - run: ollama pull ${model}`
@@ -792,6 +797,7 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
     has_wav_version: hasWav,
     ...probe,
     estimated_tempo_bpm: tempo,
+    audio_probes: (typeof probes !== 'undefined' && probes.hints) ? probes.hints : {},
     creative: creative,
     creative_status: creativeStatus
   };
@@ -818,7 +824,8 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
     ['Duration (seconds)', analysis.duration_sec || ''],
     ['Sample Rate (Hz)', analysis.sample_rate || ''],
     ['Channels', analysis.channels === 2 ? 'Stereo' : analysis.channels === 1 ? 'Mono' : analysis.channels || ''],
-    
+    ['Estimated Tempo (BPM)', analysis.estimated_tempo_bpm || ''],
+    ['Audio Detection', Object.entries(((typeof probes !== 'undefined' && probes.hints) ? probes.hints : {})).filter(([k,v]) => v).map(([k]) => k).join(', ') || 'None'],
     ['Estimated Tempo (BPM)', analysis.estimated_tempo_bpm || ''],
     ['', ''],
     ['--- Creative Analysis ---', ''],
