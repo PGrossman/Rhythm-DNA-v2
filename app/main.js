@@ -78,6 +78,39 @@ const saveSettings = async () => {
     console.log('[MAIN] Settings saved to file');
 };
 
+// Get installed Ollama models
+const getInstalledModels = async () => {
+    try {
+        const res = await fetch('http://127.0.0.1:11434/api/tags');
+        if (!res.ok) return [];
+        const data = await res.json();
+        const models = (data.models || []).map(m => ({
+            name: m.name,
+            size: m.size,
+            modified: m.modified_at
+        }));
+        const preferredOrder = [
+            'qwen2.5:32b-instruct',
+            'gemma2:27b-instruct',
+            'mixtral:8x7b',
+            'qwen3:30b',
+            'qwen3:8b'
+        ];
+        models.sort((a, b) => {
+            const ai = preferredOrder.indexOf(a.name);
+            const bi = preferredOrder.indexOf(b.name);
+            if (ai !== -1 && bi !== -1) return ai - bi;
+            if (ai !== -1) return -1;
+            if (bi !== -1) return 1;
+            return a.name.localeCompare(b.name);
+        });
+        return models;
+    } catch (e) {
+        console.log('[MAIN] Failed to get Ollama models:', e.message);
+        return [];
+    }
+};
+
 const createWindow = () => {
     const win = new BrowserWindow({
         width: 1200,
@@ -140,6 +173,10 @@ const createWindow = () => {
     // Register IPC handlers
     ipcMain.handle('getSettings', async () => {
         return settings;
+    });
+    // Installed Ollama models
+    ipcMain.handle('getInstalledModels', async () => {
+        return getInstalledModels();
     });
     
     ipcMain.handle('updateSettings', async (event, newSettings) => {

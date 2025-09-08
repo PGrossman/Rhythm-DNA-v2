@@ -66,15 +66,9 @@ const views = {
             <div style="margin-bottom: 16px;">
                 <label style="display: block; margin-bottom: 8px;">Creative Analysis Model</label>
                 <select id="ollama-model" style="width: 100%; padding: 8px 12px; border: 1px solid #d0d0d0; border-radius: 4px;">
-                    <option value="qwen2.5:32b-instruct">Qwen2.5 32B Instruct (Most Accurate)</option>
-                    <option value="gemma2:27b-instruct">Gemma 2 27B Instruct (Very Accurate)</option>
-                    <option value="mixtral:8x7b">Mixtral 8x7B (Accurate)</option>
-                    <option value="qwen3:30b">Qwen3 30B (Better Quality)</option>
-                    <option value="qwen3:8b">Qwen3 8B (Fast, Default)</option>
+                    <option value="">Loading models...</option>
                 </select>
-                <div style="margin-top: 8px; font-size: 12px; color: #666;">
-                    Note: Larger models require more RAM and take longer but provide better accuracy
-                </div>
+                <div id="model-status" style="margin-top: 8px; font-size: 12px; color: #666;"></div>
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
                 <div>
@@ -102,10 +96,39 @@ let progressStatus = {};
 
 async function setupSettingsView() {
     try {
+        // Load installed models first
+        const models = await window.api.getInstalledModels();
+        const modelSelect = document.getElementById('ollama-model');
+        const modelStatus = document.getElementById('model-status');
+        
+        if (models.length === 0) {
+            modelSelect.innerHTML = '<option value="">No models installed</option>';
+            if (modelStatus) {
+                modelStatus.innerHTML = 'No Ollama models found. Run <code>npm run install-models</code> to install recommended models.';
+            }
+        } else {
+            modelSelect.innerHTML = models.map(m => {
+                let label = m.name;
+                if (m.name === 'qwen2.5:32b-instruct') label += ' (Most Accurate)';
+                else if (m.name === 'gemma2:27b-instruct') label += ' (Very Accurate)';
+                else if (m.name === 'mixtral:8x7b') label += ' (Accurate)';
+                else if (m.name === 'qwen3:30b') label += ' (Better Quality)';
+                else if (m.name === 'qwen3:8b') label += ' (Fast)';
+                return `<option value="${m.name}">${label}</option>`;
+            }).join('');
+            if (modelStatus) {
+                modelStatus.innerText = `${models.length} model(s) available.`;
+            }
+        }
+        
         const settings = await window.api.getSettings();
         if (settings.dbFolder) document.getElementById('db-folder').value = settings.dbFolder;
         document.getElementById('auto-update-db').checked = settings.autoUpdateDb || false;
-        document.getElementById('ollama-model').value = settings.ollamaModel || 'qwen3:8b';
+        if (settings.ollamaModel && models.some(m => m.name === settings.ollamaModel)) {
+            modelSelect.value = settings.ollamaModel;
+        } else if (models.length > 0) {
+            modelSelect.value = models[0].name;
+        }
         document.getElementById('tech-concurrency').value = settings.techConcurrency || 4;
         document.getElementById('creative-concurrency').value = settings.creativeConcurrency || 2;
     } catch (err) {

@@ -4,7 +4,8 @@
     "main": "app/main.js",
     "scripts": {
         "start": "npx electron-forge start",
-        "package": "npx electron-forge package"
+        "package": "npx electron-forge package",
+        "install-models": "node scripts/install-models.js"
     },
     "devDependencies": {
         "@electron-forge/cli": "^6.4.0",
