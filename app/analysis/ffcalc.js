@@ -40,6 +40,20 @@ async function ffprobeJson(filePath) {
   };
 }
 
+// BPM normalizer - prefer 70–180 and bias toward 120 BPM
+function normalizeBpm(raw) {
+  const r = Number(raw);
+  if (!Number.isFinite(r) || r <= 0) return raw;
+  const candidates = [r, r * 0.5, r * 2];
+  const scores = candidates.map(bpm => {
+    const inRangeBonus = (bpm >= 70 && bpm <= 180) ? 100 : 0;
+    const proximityPenalty = Math.abs(bpm - 120);
+    return inRangeBonus - proximityPenalty;
+  });
+  const best = candidates[scores.indexOf(Math.max(...scores))];
+  return Math.round(best);
+}
+
 // loudness calculation removed for performance
 
 async function estimateTempo(filePath) {
@@ -207,7 +221,7 @@ async function estimateTempo(filePath) {
         }
         
         const resolved = resolveOctave(envelope, hopRate, bestBpm) ?? bestBpm ?? 120;
-        const rounded = Math.round(resolved);
+        const rounded = normalizeBpm(resolved);
         console.log(`[TEMPO] Window ${start}-${start+len}s, Raw BPM: ${bestBpm?.toFixed(1)}, Resolved: ${resolved?.toFixed(1)}, Final: ${rounded}`);
         resolve(rounded);
       });
@@ -753,6 +767,28 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
     checkWavExists(filePath),
     estimateTempo(filePath)
   ]);
+  
+  // Run audio probes - THIS WAS MISSING!
+  let probes = { status: 'skipped', hints: {} };
+  try {
+    const durationSec = probe?.duration_sec || 0;
+    if (durationSec > 5) {
+      console.log('[AUDIO_PROBE] Starting analysis for', baseName);
+      probes = await runAudioProbes(filePath, durationSec, baseName);
+      if (probes.status === 'ok' && probes.hints) {
+        const detected = Object.entries(probes.hints)
+          .filter(([k, v]) => v)
+          .map(([k]) => k)
+          .join(', ');
+        console.log('[AUDIO_PROBE] Detected:', detected || 'nothing');
+        if (probes.labels) {
+          console.log('[AUDIO_PROBE] Raw labels:', probes.labels);
+        }
+      }
+    }
+  } catch (e) {
+    console.log('[AUDIO_PROBE] Error:', e.message);
+  }
   // Send technical complete, creative starting event
   if (win) {
     win.webContents.send('jobProgress', {
@@ -771,7 +807,7 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
   const dir = path.dirname(filePath);
   
   // Run full creative analysis
-  const creativeResult = await runCreativeAnalysis(baseName, tempo, model, (typeof probes !== 'undefined' && probes.hints) ? probes.hints : null);
+  const creativeResult = await runCreativeAnalysis(baseName, tempo, model, probes.hints);
   const creative = creativeResult.data;
   const creativeStatus = creativeResult.modelMissing
     ? `Model '${model}' not installed - run: ollama pull ${model}`
@@ -790,6 +826,31 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
     });
   }
   
+  // Lightly merge audio probe hints into creative results (additive only)
+  if (probes.hints && Object.keys(probes.hints).some(k => probes.hints[k])) {
+    const add = (arr, val) => {
+      if (!Array.isArray(arr)) return;
+      if (val && !arr.some(item => item === val || String(item).toLowerCase() === String(val).toLowerCase())) {
+        arr.push(val);
+      }
+    };
+    if (!Array.isArray(creative.instrument)) creative.instrument = [];
+    if (!Array.isArray(creative.vocals)) creative.vocals = [];
+    
+    if (probes.hints.brass) add(creative.instrument, 'Brass (section)');
+    if (probes.hints.trumpet) add(creative.instrument, 'Trumpet');
+    if (probes.hints.trombone) add(creative.instrument, 'Trombone');
+    if (probes.hints.saxophone) add(creative.instrument, 'Saxophone');
+    if (probes.hints.guitar) add(creative.instrument, 'Electric Guitar');
+    if (probes.hints.piano) add(creative.instrument, 'Piano');
+    if (probes.hints.drumkit) add(creative.instrument, 'Drum Kit (acoustic)');
+    
+    if ((probes.hints.vocals || probes.hints.choir) &&
+        (creative.vocals.length === 0 || creative.vocals.includes('No Vocals'))) {
+      creative.vocals = ['Background Vocals'];
+    }
+  }
+  
   const analysis = {
     file: path.basename(filePath),
     path: filePath,
@@ -797,7 +858,7 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
     has_wav_version: hasWav,
     ...probe,
     estimated_tempo_bpm: tempo,
-    audio_probes: (typeof probes !== 'undefined' && probes.hints) ? probes.hints : {},
+    audio_probes: probes.hints || {},
     creative: creative,
     creative_status: creativeStatus
   };
@@ -825,8 +886,7 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
     ['Sample Rate (Hz)', analysis.sample_rate || ''],
     ['Channels', analysis.channels === 2 ? 'Stereo' : analysis.channels === 1 ? 'Mono' : analysis.channels || ''],
     ['Estimated Tempo (BPM)', analysis.estimated_tempo_bpm || ''],
-    ['Audio Detection', Object.entries(((typeof probes !== 'undefined' && probes.hints) ? probes.hints : {})).filter(([k,v]) => v).map(([k]) => k).join(', ') || 'None'],
-    ['Estimated Tempo (BPM)', analysis.estimated_tempo_bpm || ''],
+    ['Audio Detection', Object.entries(probes.hints || {}).filter(([k, v]) => v).map(([k]) => k).join(', ') || 'None'],
     ['', ''],
     ['--- Creative Analysis ---', ''],
     ['Analysis Status', analysis.creative_status || ''],

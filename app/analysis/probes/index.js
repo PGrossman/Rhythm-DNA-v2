@@ -1,6 +1,6 @@
 'use strict';
 
-const { probeYamnet } = require('./mediapipe-yamnet.js');
+const { probeYamnet, probeYamnetRange } = require('./mediapipe-yamnet.js');
 const { probeZeroShot } = require('./transformers-zero-shot.js');
 
 const ZS_LABELS = [
@@ -21,20 +21,50 @@ async function withTimeout(promise, ms, label) {
 	}
 }
 
-async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
-	const winSec = opts.winSec ?? 5;
-	const centerFrac = opts.centerFrac ?? 0.35;
-	const timeouts = { yamnet: 3000, zshot: 2000 };
+function orHints(a = {}, b = {}) {
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    const out = {};
+    for (const k of keys) out[k] = Boolean(a[k]) || Boolean(b[k]);
+    return out;
+}
 
-	let yam = { status: 'skipped' };
+
+async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
+	// Three-window strategy: Intro (0-30s), Middle (50%), Outro (70%)
+	const introLen = Math.min(30, durationSec / 3);
+
+	let intro = { status: 'skipped' };
 	try {
-		yam = await withTimeout(
-			probeYamnet(filePath, durationSec, { winSec, centerFrac }),
-			timeouts.yamnet,
-			'yamnet'
+		intro = await withTimeout(
+			probeYamnetRange(filePath, 0, introLen),
+			4000,
+			'yamnet-intro'
+		);
+		console.log('[PROBE] Intro labels:', intro.labels?.slice(0, 5));
+	} catch (e) {
+		intro = { status: 'skipped', error: String(e.message || e) };
+	}
+
+	let middle = { status: 'skipped' };
+	try {
+		middle = await withTimeout(
+			probeYamnet(filePath, durationSec, { winSec: 5, centerFrac: 0.50 }),
+			3000,
+			'yamnet-middle'
 		);
 	} catch (e) {
-		yam = { status: 'skipped', error: String(e.message || e) };
+		middle = { status: 'skipped', error: String(e.message || e) };
+	}
+
+	let outro = { status: 'skipped' };
+	try {
+		outro = await withTimeout(
+			probeYamnet(filePath, durationSec, { winSec: 5, centerFrac: 0.70 }),
+			3000,
+			'yamnet-outro'
+		);
+	} catch (e) {
+		outro = { status: 'skipped', error: String(e.message || e) };
 	}
 
 	let zsa = { status: 'skipped' };
@@ -43,7 +73,7 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 			const description = `A music track titled "${baseName}"`;
 			zsa = await withTimeout(
 				probeZeroShot(description, ZS_LABELS),
-				timeouts.zshot,
+				2000,
 				'zero-shot'
 			);
 		} catch (e) {
@@ -51,7 +81,7 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 		}
 	}
 
-	const hints = Object.assign({}, yam.hints || {});
+	const hints = orHints(intro.hints, middle.hints, outro.hints);
 	if (zsa.scores) {
 		const s = zsa.scores;
 		const gt = (k, thr) => (s[k] && s[k] >= thr);
@@ -59,9 +89,14 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 		if (!hints.vocals && (gt('Lead Vocals', 0.5) || gt('Male Vocals', 0.5) || gt('Female Vocals', 0.5))) hints.vocals = true;
 	}
 
-	const status = (yam.status === 'ok' || zsa.status === 'ok') ? 'ok' : 'skipped';
+	const status = (intro.status === 'ok' || middle.status === 'ok' || outro.status === 'ok' || zsa.status === 'ok') ? 'ok' : 'skipped';
 	console.log(`[AUDIO_PROBE] Status: ${status}, Hints:`, hints);
-	return { status, hints, yamnet: yam, zeroshot: zsa, meta: { winSec, centerFrac } };
+	const labels = {
+		intro: (intro.labels || []).slice(0, 10),
+		middle: (middle.labels || []).slice(0, 10),
+		outro: (outro.labels || []).slice(0, 10)
+	};
+	return { status, hints, labels, meta: { introLen, windows: ['0-30s', '50%', '70%'] } };
 }
 
 module.exports = { runAudioProbes };

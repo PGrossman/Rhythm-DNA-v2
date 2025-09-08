@@ -55,9 +55,10 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 		);
 
 		const pcm = await ffmpegDecodeToF32(filePath, start, winSec);
-		const result = await classifier.classify(pcm);
+		// Pass explicit sample rate to avoid resampling issues
+		const result = await classifier.classify(pcm, 16000);
 		const cats = (result?.classifications?.[0]?.categories || [])
-						.filter(c => (c.score ?? 0) >= 0.15)
+						.filter(c => (c.score ?? 0) >= 0.12)
 						.map(c => c.categoryName);
 
 		const hints = {
@@ -79,6 +80,40 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 	}
 }
 
-module.exports = { probeYamnet };
+// Probe a specific [start, start+dur] window for early/intro analysis
+async function probeYamnetRange(filePath, startSec, durSec) {
+    try {
+        const { FilesetResolver, AudioClassifier } = await loadMediaPipe();
+        const fileset = await FilesetResolver.forAudioTasks(
+            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-audio/wasm'
+        );
+        const classifier = await AudioClassifier.createFromModelPath(
+            fileset,
+            'https://storage.googleapis.com/mediapipe-models/audio_classifier/yamnet/float32/1/yamnet.tflite'
+        );
+        const pcm = await ffmpegDecodeToF32(filePath, startSec, durSec);
+        const result = await classifier.classify(pcm, 16000);
+        const cats = (result?.classifications?.[0]?.categories || [])
+                        .filter(c => (c.score ?? 0) >= 0.10)
+                        .map(c => c.categoryName);
+        const hints = {
+            vocals:    pick(cats, 'vocal music', 'singing', 'speech', 'singer', 'choir'),
+            choir:     pick(cats, 'choir'),
+            brass:     pick(cats, 'brass instrument', 'horn', 'saxophone', 'trumpet', 'trombone'),
+            trumpet:   pick(cats, 'trumpet'),
+            trombone:  pick(cats, 'trombone'),
+            saxophone: pick(cats, 'saxophone'),
+            drumkit:   pick(cats, 'drum', 'drum kit', 'snare drum', 'cymbal'),
+            guitar:    pick(cats, 'electric guitar', 'acoustic guitar', 'guitar'),
+            piano:     pick(cats, 'piano', 'keyboard')
+        };
+        return { status: 'ok', hints, labels: cats, meta: { startSec, winSec: durSec } };
+    } catch (e) {
+        console.log('[YAMNET-RANGE] Error:', e.message);
+        return { status: 'skipped', error: e.message };
+    }
+}
+
+module.exports = { probeYamnet, probeYamnetRange };
 
 
