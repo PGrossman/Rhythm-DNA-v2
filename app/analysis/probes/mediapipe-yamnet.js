@@ -1,43 +1,22 @@
 'use strict';
 
-// Node-friendly YAMNet probe via @xenova/transformers (no DOM required)
+// Node-friendly audio classification via @xenova/transformers (AST model)
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-let yamnetPipe = null;
+let audioPipe = null;
 
-async function ensureYamnet() {
-	if (yamnetPipe) return yamnetPipe;
-	const fs = require('node:fs');
+async function ensureAudioClassifier() {
+	if (audioPipe) return audioPipe;
 	const { pipeline, env } = await import('@xenova/transformers');
-	// Configure local cache directory; disable remote fetch at runtime
-	const modelsDir = path.resolve(process.cwd(), 'app', 'models', 'xenova');
-	env.cacheDir = modelsDir;
-	env.localModelPath = modelsDir;
+	const cacheDir = path.resolve(process.cwd(), 'app', 'models', 'xenova');
+	const repoDir = path.resolve(cacheDir, 'Xenova', 'ast-finetuned-audioset-10-10-0.4593');
+	env.cacheDir = cacheDir;
+	env.localModelPath = cacheDir;
 	env.allowLocalModels = true;
 	env.allowRemoteModels = false;
-
-	// Verify files exist in the expected location
-	const repo = path.join(modelsDir, 'Xenova', 'yamnet');
-	const required = [
-		path.join(repo, 'config.json'),
-		path.join(repo, 'preprocessor_config.json'),
-		path.join(repo, 'onnx', 'model.onnx')
-	];
-	const missing = required.filter(f => !fs.existsSync(f));
-	if (missing.length > 0) {
-		console.log('[YAMNET] Missing files:', missing);
-		console.log('[YAMNET] Run: npm run get-yamnet');
-		return null;
-	}
-
-	try {
-		yamnetPipe = await pipeline('audio-classification', repo);
-		console.log('[YAMNET] Loaded from', repo);
-		return yamnetPipe;
-	} catch (e) {
-		console.log('[YAMNET] Failed to load pipeline:', e.message);
-		return null;
-	}
+	audioPipe = await pipeline('audio-classification', repoDir);
+	console.log('[AUDIO-CLS] Loaded AST from', repoDir);
+	return audioPipe;
 }
 
 function ffmpegDecodeToTensor(filePath, startSec, durSec, sr = 16000) {
@@ -81,7 +60,7 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 	const start = Math.max(0, Math.min(durationSec - winSec, center - winSec / 2));
 	
 	try {
-		const pipe = await ensureYamnet();
+		const pipe = await ensureAudioClassifier();
 		if (!pipe) return { status: 'skipped', error: 'Pipeline unavailable' };
 		
 		const input = await ffmpegDecodeToTensor(filePath, start, winSec, 16000);
