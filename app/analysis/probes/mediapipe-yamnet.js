@@ -8,14 +8,19 @@ let audioPipe = null;
 async function ensureAudioClassifier() {
 	if (audioPipe) return audioPipe;
 	const { pipeline, env } = await import('@xenova/transformers');
-	const cacheDir = path.resolve(process.cwd(), 'app', 'models', 'xenova');
-	const repoDir = path.resolve(cacheDir, 'Xenova', 'ast-finetuned-audioset-10-10-0.4593');
-	env.cacheDir = cacheDir;
-	env.localModelPath = cacheDir;
+	// IMPORTANT: Use a relative cache root and pass the repo ID to pipeline.
+	// This avoids doubled filesystem paths.
+	const cacheRoot = 'app/models/xenova';
+	env.cacheDir = cacheRoot;
+	env.localModelPath = cacheRoot;
 	env.allowLocalModels = true;
 	env.allowRemoteModels = false;
-	audioPipe = await pipeline('audio-classification', repoDir);
-	console.log('[AUDIO-CLS] Loaded AST from', repoDir);
+	audioPipe = await pipeline(
+		'audio-classification',
+		'Xenova/ast-finetuned-audioset-10-10-0.4593',
+		{ quantized: false, dtype: 'fp32' }
+	);
+	console.log('[AUDIO-CLS] Loaded AST from local cache');
 	return audioPipe;
 }
 
@@ -73,10 +78,12 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 			brass: Math.max(s('Brass instrument'), s('Trumpet'), s('Trombone'), s('Saxophone')) >= 0.10,
 			trumpet: s('Trumpet') >= 0.08,
 			trombone: s('Trombone') >= 0.06,
-			saxophone: s('Saxophone') >= 0.10,
+			saxophone: s('Saxophone') >= 0.09,
 			drumkit: Math.max(s('Drum kit'), s('Drum'), s('Snare drum')) >= 0.14,
 			guitar: Math.max(s('Electric guitar'), s('Acoustic guitar')) >= 0.14,
-			piano: s('Piano') >= 0.14
+			piano: s('Piano') >= 0.12,
+			organ: Math.max(s('Organ'), s('Hammond organ')) >= 0.10,
+			bass: Math.max(s('Bass guitar'), s('Electric bass')) >= 0.10
 		};
 		
 		return {
@@ -87,7 +94,7 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 			meta: { startSec: start, winSec }
 		};
 	} catch (e) {
-		console.log('[YAMNET] Error:', e.message);
+		console.log('[AST] Error:', e.message);
 		return { status: 'skipped', error: e.message };
 	}
 }
