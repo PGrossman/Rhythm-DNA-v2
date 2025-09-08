@@ -78,33 +78,21 @@ const saveSettings = async () => {
     console.log('[MAIN] Settings saved to file');
 };
 
-// Get installed Ollama models
+// Get installed Ollama models (restricted to supported set)
 const getInstalledModels = async () => {
+    const SUPPORTED_MODELS = [
+        'qwen2.5:32b-instruct',
+        'gemma2:27b-instruct',
+        'mixtral:8x7b',
+        'qwen3:30b',
+        'qwen3:8b'
+    ];
     try {
         const res = await fetch('http://127.0.0.1:11434/api/tags');
         if (!res.ok) return [];
         const data = await res.json();
-        const models = (data.models || []).map(m => ({
-            name: m.name,
-            size: m.size,
-            modified: m.modified_at
-        }));
-        const preferredOrder = [
-            'qwen2.5:32b-instruct',
-            'gemma2:27b-instruct',
-            'mixtral:8x7b',
-            'qwen3:30b',
-            'qwen3:8b'
-        ];
-        models.sort((a, b) => {
-            const ai = preferredOrder.indexOf(a.name);
-            const bi = preferredOrder.indexOf(b.name);
-            if (ai !== -1 && bi !== -1) return ai - bi;
-            if (ai !== -1) return -1;
-            if (bi !== -1) return 1;
-            return a.name.localeCompare(b.name);
-        });
-        return models;
+        const installedModels = (data.models || []).map(m => m.name);
+        return SUPPORTED_MODELS.filter(model => installedModels.some(m => m === model || m.startsWith(model + ':')));
     } catch (e) {
         console.log('[MAIN] Failed to get Ollama models:', e.message);
         return [];
