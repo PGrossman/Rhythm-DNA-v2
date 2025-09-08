@@ -39,66 +39,7 @@ async function ffprobeJson(filePath) {
   };
 }
 
-async function ffmpegLoudness(filePath) {
-  // Measure EBU R128 loudness on FULL track, original stereo
-  const args = [
-    '-nostats', '-hide_banner', '-i', filePath,
-    '-filter:a', 'ebur128=peak=true',
-    '-f', 'null', '-'
-  ];
-  
-  const stderr = await run('ffmpeg', args, { collect: 'stderr' });
-  
-  // Normalize Unicode minus (U+2212) to ASCII hyphen
-  const s = stderr.replace(/\u2212/g, '-');
-  
-  // Debug: log the full stderr to see what we're getting
-  console.log('[LOUDNESS] Raw stderr (first 500 chars):', s.substring(0, 500));
-  
-  // Parse EBU R128 output - look for both formats
-  // Format 1: "I:         -14.2 LUFS"
-  // Format 2: "Integrated loudness: -14.2 LUFS"
-  const mI = /I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i.exec(s) || 
-             /Integrated loudness:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i.exec(s);
-  
-  const mLRA = /LRA:\s*(-?\d+(?:\.\d+)?)\s*LU\b/i.exec(s) || 
-               /Loudness range:\s*(-?\d+(?:\.\d+)?)\s*LU\b/i.exec(s);
-  
-  // True peak is usually reported as dBTP (not dBFS). Support both, plus "TP:" variants.
-  const mTP = /True peak:\s*(-?\d+(?:\.\d+)?)\s*dBTP/i.exec(s) ||
-              /True peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS/i.exec(s) ||
-              /TP:\s*(-?\d+(?:\.\d+)?)\s*dB(?:TP|FS)/i.exec(s) ||
-              /Peak:\s*(-?\d+(?:\.\d+)?)\s*dB(?:TP|FS)/i.exec(s);
-  
-  const parsedI = mI ? Number(mI[1]) : null;
-  console.log(`[LOUDNESS] Parsed - LUFS: ${parsedI}, LRA: ${mLRA?.[1]}, True Peak: ${mTP?.[1]}`);
-  
-  // If LUFS is missing or out of sane range [-50, 0], fall back to loudnorm
-  const lufsBad = (parsedI == null) || !Number.isFinite(parsedI) || parsedI < -50 || parsedI > 0;
-  if (lufsBad) {
-    console.log('[LOUDNESS] ebur128 parsing failed, trying loudnorm fallback...');
-    const lnArgs = ['-hide_banner', '-nostats', '-i', filePath, '-af', 'loudnorm=print_format=json', '-f', 'null', '-'];
-    const ln = await run('ffmpeg', lnArgs, { collect: 'stderr' });
-    // loudnorm prints measured values as JSON-ish keys
-    // e.g. "input_i" : "-14.23", "input_tp" : "-0.30", "input_lra" : "5.10"
-    const iI   = /"input_i"\s*:\s*"(-?\d+(?:\.\d+)?)"/i.exec(ln);
-    const iTP  = /"input_tp"\s*:\s*"(-?\d+(?:\.\d+)?)"/i.exec(ln);
-    const iLRA = /"input_lra"\s*:\s*"(-?\d+(?:\.\d+)?)"/i.exec(ln);
-    const lnI = iI ? Number(iI[1]) : null;
-    console.log(`[LOUDNESS] loudnorm fallback - LUFS: ${lnI}, LRA: ${iLRA?.[1]}, TP: ${iTP?.[1]}`);
-    return {
-      lufs_integrated: (Number.isFinite(lnI) && lnI >= -50 && lnI <= 0) ? lnI : null,
-      loudness_range:  iLRA ? Number(iLRA[1]) : null,
-      true_peak_db:    iTP ? Number(iTP[1]) : (mTP ? Number(mTP[1]) : null)
-    };
-  }
-  
-  return {
-    lufs_integrated: parsedI,
-    loudness_range:  mLRA ? Number(mLRA[1]) : null,
-    true_peak_db:    mTP ? Number(mTP[1]) : null
-  };
-}
+// loudness calculation removed for performance
 
 async function estimateTempo(filePath) {
   try {
@@ -318,7 +259,7 @@ async function checkOllamaModel(model) {
 }
 
 // Full creative analysis with Envato taxonomy
-async function runCreativeAnalysis(baseName, bpm, loudness, model = 'qwen3:8b') {
+async function runCreativeAnalysis(baseName, bpm, model = 'qwen3:8b') {
   console.log('[CREATIVE] Running full creative analysis...');
   
   // Check if model is installed
@@ -641,7 +582,6 @@ Return ONLY valid JSON, no other text.`;
   const userPrompt = `Analyze this track:
 Title: "${baseName}"
 Tempo: ${bpm || 'Unknown'} BPM
-Loudness: ${loudness || 'Unknown'} LUFS
 
 Based on the title and technical characteristics, provide your creative analysis. Be thorough in identifying instruments.`;
 
@@ -803,9 +743,8 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
       note: 'Running technical analysis...'
     });
   }
-  const [probe, loudness, hasWav, tempo] = await Promise.all([
+  const [probe, hasWav, tempo] = await Promise.all([
     ffprobeJson(filePath),
-    ffmpegLoudness(filePath),
     checkWavExists(filePath),
     estimateTempo(filePath)
   ]);
@@ -827,7 +766,7 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
   const dir = path.dirname(filePath);
   
   // Run full creative analysis
-  const creativeResult = await runCreativeAnalysis(baseName, tempo, loudness?.lufs_integrated, model);
+  const creativeResult = await runCreativeAnalysis(baseName, tempo, model);
   const creative = creativeResult.data;
   const creativeStatus = creativeResult.modelMissing
     ? `Model '${model}' not installed - run: ollama pull ${model}`
@@ -852,7 +791,6 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
     analyzed_at: new Date().toISOString(),
     has_wav_version: hasWav,
     ...probe,
-    ...loudness,
     estimated_tempo_bpm: tempo,
     creative: creative,
     creative_status: creativeStatus
@@ -880,7 +818,7 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
     ['Duration (seconds)', analysis.duration_sec || ''],
     ['Sample Rate (Hz)', analysis.sample_rate || ''],
     ['Channels', analysis.channels === 2 ? 'Stereo' : analysis.channels === 1 ? 'Mono' : analysis.channels || ''],
-    ['Average Loudness (LUFS)', analysis.lufs_integrated ?? ''],
+    
     ['Estimated Tempo (BPM)', analysis.estimated_tempo_bpm || ''],
     ['', ''],
     ['--- Creative Analysis ---', ''],
