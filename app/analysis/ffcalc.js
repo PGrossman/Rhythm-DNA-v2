@@ -287,9 +287,51 @@ async function checkWavExists(mp3Path) {
   }
 }
 
+// Check if Ollama model is installed
+async function checkOllamaModel(model) {
+  return new Promise((resolve) => {
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: 11434,
+      path: '/api/tags',
+      method: 'GET'
+    }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          const models = (parsed.models || []).map(m => m.name);
+          const hasModel = models.some(m => m === model || m.startsWith(model + ':'));
+          console.log(`[OLLAMA] Available models: ${models.join(', ')}`);
+          console.log(`[OLLAMA] Requested model '${model}' ${hasModel ? 'found' : 'NOT FOUND'}`);
+          resolve(hasModel);
+        } catch (e) {
+          console.log('[OLLAMA] Failed to check models:', e.message);
+          resolve(false);
+        }
+      });
+    });
+    req.on('error', () => resolve(false));
+    req.end();
+  });
+}
+
 // Full creative analysis with Envato taxonomy
 async function runCreativeAnalysis(baseName, bpm, loudness, model = 'qwen3:8b') {
   console.log('[CREATIVE] Running full creative analysis...');
+  
+  // Check if model is installed
+  const modelInstalled = await checkOllamaModel(model);
+  if (!modelInstalled) {
+    console.log(`[CREATIVE] Model '${model}' not installed. Please run: ollama pull ${model}`);
+    return { 
+      error: true, 
+      offline: false,
+      modelMissing: true,
+      data: getDefaultCreative() 
+    };
+  }
   
   // Expanded Envato taxonomy with comprehensive instruments
   const ENVATO_TAXONOMY = {
@@ -622,7 +664,6 @@ Based on the title and technical characteristics, provide your creative analysis
   console.log(`[CREATIVE] Using model: ${model} (temp: ${temperature})`);
 
   return new Promise((resolve) => {
-    const http = require('http');
     const req = http.request({
       hostname: '127.0.0.1',
       port: 11434,
@@ -637,11 +678,26 @@ Based on the title and technical characteristics, provide your creative analysis
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         try {
+          // Log raw response for debugging (small payloads)
+          if (data.length < 500) {
+            console.log('[CREATIVE] Raw response:', data);
+          }
           const parsed = JSON.parse(data);
-          const content = parsed.message?.content;
+          
+          // Try different response structures
+          let content = parsed.message?.content || // chat endpoint
+                        parsed.response ||         // generate endpoint
+                        parsed.content;            // alternative structure
+          
+          // Check for error in response
+          if (parsed.error) {
+            console.log('[CREATIVE] Ollama error:', parsed.error);
+            resolve({ error: true, data: getDefaultCreative() });
+            return;
+          }
           
           if (!content) {
-            console.log('[CREATIVE] No content in response');
+            console.log('[CREATIVE] No content in response. Response keys:', Object.keys(parsed));
             resolve({ error: true, data: getDefaultCreative() });
             return;
           }
@@ -726,6 +782,7 @@ function getDefaultCreative() {
     theme: [],
     instrument: [],
     vocals: [],
+    lyricThemes: [],
     narrative: 'Creative analysis unavailable',
     confidence: 0
   };
@@ -768,7 +825,9 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
   // Run full creative analysis
   const creativeResult = await runCreativeAnalysis(baseName, tempo, loudness?.lufs_integrated, model);
   const creative = creativeResult.data;
-  const creativeStatus = creativeResult.offline 
+  const creativeStatus = creativeResult.modelMissing
+    ? `Model '${model}' not installed - run: ollama pull ${model}`
+    : creativeResult.offline 
     ? 'Ollama offline - creative analysis skipped'
     : creativeResult.error
     ? 'Creative analysis error - using defaults'
