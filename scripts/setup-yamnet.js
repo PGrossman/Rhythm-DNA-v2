@@ -4,7 +4,10 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
-const YAMNET_MODEL_URL = 'https://storage.googleapis.com/tfjs-models/tfjs/yamnet/tfjs/1.0.0/';
+// Updated YAMNet model URLs (older googleapis path returns 404)
+// Reference (for info): TensorFlow Hub card
+const YAMNET_MODEL_URL = 'https://www.kaggle.com/models/google/yamnet/frameworks/tfJs/variations/tfjs/versions/1/';
+const YAMNET_TFHUB_URL = 'https://tfhub.dev/google/tfjs-model/yamnet/classification/tfjs/1';
 const MODEL_FILES = [
   'model.json',
   'group1-shard1of1.bin'
@@ -19,6 +22,30 @@ console.log('==================\n');
 if (!fs.existsSync(MODELS_DIR)) {
   fs.mkdirSync(MODELS_DIR, { recursive: true });
   console.log(`✓ Created directory: ${MODELS_DIR}`);
+}
+
+// Alternative: Download from TensorFlow Hub TFJS module storage (preferred)
+async function downloadFromTFJS() {
+  const TFJS_BASE = 'https://storage.googleapis.com/tfhub-tfjs-modules/google/';
+  const YAMNET_PATH = 'tfjs-model/yamnet/classification/tfjs/1/';
+  const files = {
+    'model.json': TFJS_BASE + YAMNET_PATH + 'model.json',
+    'group1-shard1of1.bin': TFJS_BASE + YAMNET_PATH + 'group1-shard1of1.bin'
+  };
+  console.log('Downloading YAMNet model from TensorFlow Hub...\n');
+  for (const [filename, url] of Object.entries(files)) {
+    const dest = path.join(MODELS_DIR, filename);
+    if (fs.existsSync(dest)) {
+      console.log(`✓ ${filename} already exists`);
+      continue;
+    }
+    try {
+      await downloadFile(url, dest);
+    } catch (err) {
+      console.error(`✗ Failed to download ${filename}: ${err.message}`);
+      throw err;
+    }
+  }
 }
 
 // Download file helper
@@ -77,24 +104,16 @@ async function setupYamnet() {
       }
       if (allFilesExist) {
         console.log('✓ All model files present');
-      } else {
-        console.log('\nDownloading missing model files...');
-        for (const file of MODEL_FILES) {
-          const url = YAMNET_MODEL_URL + file;
-          const dest = path.join(MODELS_DIR, file);
-          if (!fs.existsSync(dest)) await downloadFile(url, dest);
-        }
+        // Ensure class names are present
+        await downloadClassNames();
+        return;
       }
     } else {
-      console.log('\nDownloading YAMNet model files...');
-      console.log('This may take a few minutes.');
-      for (const file of MODEL_FILES) {
-        const url = YAMNET_MODEL_URL + file;
-        const dest = path.join(MODELS_DIR, file);
-        await downloadFile(url, dest);
-      }
+      // no-op here; we will proceed to hub download below
     }
 
+    // Use the TensorFlow Hub direct download
+    await downloadFromTFJS();
     await downloadClassNames();
 
     console.log('\n✓ YAMNet model setup complete!');
