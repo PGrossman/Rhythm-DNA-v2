@@ -574,7 +574,7 @@ Return ONLY a JSON object with this exact structure:
   "mood": ["1-3 moods from the list above"],
   "genre": ["1-2 genres from the list above"],
   "theme": ["1-2 themes from the list above"],
-  "instrument": ["detected instruments from the list above - be comprehensive"],
+  "instrument": ["3-6 PRIMARY instruments only from the list above"],
   "vocals": ["MUST be one or more from: No Vocals, Background Vocals, Female Vocals, Male Vocals, Lead Vocals, Vocal Samples"],
   "lyricThemes": ["1-2 lyric themes IF vocals are present, otherwise empty array"],
   "narrative": "A compelling 40-80 word description of the track's musical character, emotional impact, and sonic qualities",
@@ -709,11 +709,13 @@ Based on the title and technical characteristics, provide your creative analysis
           // Validate and normalize
           const normalizedVocals = normalizeVocals(creative.vocals);
           const hasVocals = !normalizedVocals.includes("No Vocals");
+          const MAX_INSTRUMENTS = 8;
+          const rawInstruments = normalizeInstruments(creative.instrument || []);
           const validated = {
             mood: (creative.mood || []).filter(m => ENVATO_TAXONOMY.mood.includes(m)),
             genre: (creative.genre || []).filter(g => ENVATO_TAXONOMY.genre.includes(g)),
             theme: (creative.theme || []).filter(t => ENVATO_TAXONOMY.theme.includes(t)),
-            instrument: normalizeInstruments(creative.instrument || []), // Use normalizer
+            instrument: rawInstruments.slice(0, MAX_INSTRUMENTS), // cap count
             vocals: normalizedVocals, // Enhanced vocal normalization
             lyricThemes: hasVocals ? (creative.lyricThemes || []).filter(t => ENVATO_TAXONOMY.lyricThemes.includes(t)) : [],
             narrative: String(creative.narrative || 'No description available').slice(0, 200),

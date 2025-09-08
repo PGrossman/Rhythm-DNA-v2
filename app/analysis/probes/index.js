@@ -1,7 +1,7 @@
 'use strict';
 
 const { probeYamnet, probeYamnetRange } = require('./mediapipe-yamnet.js');
-const { probeZeroShot } = require('./transformers-zero-shot.js');
+// const { probeZeroShot } = require('./transformers-zero-shot.js'); // Disabled until zero-shot-audio model available
 
 const ZS_LABELS = [
 	'Brass section', 'Trumpet', 'Trombone', 'Saxophone',
@@ -67,29 +67,12 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 		outro = { status: 'skipped', error: String(e.message || e) };
 	}
 
-	let zsa = { status: 'skipped' };
-	if (baseName) {
-		try {
-			const description = `A music track titled "${baseName}"`;
-			zsa = await withTimeout(
-				probeZeroShot(description, ZS_LABELS),
-				2000,
-				'zero-shot'
-			);
-		} catch (e) {
-			zsa = { status: 'skipped', error: String(e.message || e) };
-		}
-	}
+    // Zero-shot disabled - to re-enable use a zero-shot audio model, e.g. 'Xenova/clap-htsat-unfused'
 
 	const hints = orHints(intro.hints, middle.hints, outro.hints);
-	if (zsa.scores) {
-		const s = zsa.scores;
-		const gt = (k, thr) => (s[k] && s[k] >= thr);
-		if (!hints.brass && (gt('Brass section', 0.6) || gt('Trumpet', 0.6) || gt('Trombone', 0.6))) hints.brass = true;
-		if (!hints.vocals && (gt('Lead Vocals', 0.5) || gt('Male Vocals', 0.5) || gt('Female Vocals', 0.5))) hints.vocals = true;
-	}
+    // No zero-shot post-processing
 
-	const status = (intro.status === 'ok' || middle.status === 'ok' || outro.status === 'ok' || zsa.status === 'ok') ? 'ok' : 'skipped';
+	const status = (intro.status === 'ok' || middle.status === 'ok' || outro.status === 'ok') ? 'ok' : 'skipped';
 	console.log(`[AUDIO_PROBE] Status: ${status}, Hints:`, hints);
 	const labels = {
 		intro: (intro.labels || []).slice(0, 10),

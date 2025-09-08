@@ -1,18 +1,26 @@
 'use strict';
 
 // Node-friendly YAMNet probe via @xenova/transformers (no DOM required)
+const path = require('node:path');
 const { spawn } = require('node:child_process');
 let yamnetPipe = null;
 
 async function ensureYamnet() {
 	if (yamnetPipe) return yamnetPipe;
+	const { pipeline, env } = await import('@xenova/transformers');
+	// Configure local cache directory; disable remote fetch at runtime
+	const modelsDir = path.resolve(process.cwd(), 'app', 'models', 'xenova');
+	env.cacheDir = modelsDir;
+	env.localModelPath = modelsDir;
+	env.allowLocalModels = true;
+	env.allowRemoteModels = false;
 	try {
-		const { pipeline } = await import('@xenova/transformers');
 		yamnetPipe = await pipeline('audio-classification', 'Xenova/yamnet');
-		console.log('[YAMNET] Pipeline loaded successfully');
+		console.log('[YAMNET] Pipeline loaded from cache');
 		return yamnetPipe;
 	} catch (e) {
 		console.log('[YAMNET] Failed to load pipeline:', e.message);
+		console.log('[YAMNET] Run once with internet: npm run warm-models');
 		return null;
 	}
 }
