@@ -477,6 +477,23 @@ async function runCreativeAnalysis(baseName, bpm, loudness) {
     "steel drums": "Steelpan (Steel Drum)",
     "steelpan": "Steelpan (Steel Drum)",
     
+    // Vocal synonyms - CRITICAL for reliable detection
+    "lead vocal": "Lead Vocals",
+    "lead singer": "Lead Vocals", 
+    "singer": "Lead Vocals",
+    "vox": "Lead Vocals",
+    "lead vox": "Lead Vocals",
+    "main vocal": "Lead Vocals",
+    "male vocal": "Male Vocals",
+    "male singer": "Male Vocals",
+    "female vocal": "Female Vocals",
+    "female singer": "Female Vocals",
+    "backing vocals": "Background Vocals",
+    "backing vocal": "Background Vocals",
+    "bg vocals": "Background Vocals",
+    "vocal sample": "Vocal Samples",
+    "vocal chops": "Vocal Samples",
+    
     // Sound Design
     "riser": "Riser",
     "risers": "Riser",
@@ -552,7 +569,7 @@ Return ONLY a JSON object with this exact structure:
   "genre": ["1-2 genres from the list above"],
   "theme": ["1-2 themes from the list above"],
   "instrument": ["detected instruments from the list above - be comprehensive"],
-  "vocals": ["vocal characteristics from the list above"],
+  "vocals": ["MUST be one or more from: No Vocals, Background Vocals, Female Vocals, Male Vocals, Lead Vocals, Vocal Samples"],
   "narrative": "A 40-60 word description of the track's musical character and emotional impact",
   "confidence": 0.0-1.0
 }
@@ -563,6 +580,9 @@ CRITICAL:
 - Common variations like "drums", "bass", "piano" should map to their proper names from the list
 - Include both primary and secondary instruments
 - If you detect synthesizers, specify the type (Synth Pad, Synth Lead, etc.)
+ - For vocals: ALWAYS include at least one vocal type. If no vocals detected, use ["No Vocals"]
+ - If vocals are present, be specific: use "Lead Vocals" for main vocals, add "Male Vocals" or "Female Vocals" if identifiable
+ - Never leave vocals array empty
 Return ONLY valid JSON, no other text.`;
 
   const userPrompt = `Analyze this track:
@@ -614,13 +634,38 @@ Based on the title and technical characteristics, provide your creative analysis
           // Parse the JSON response
           const creative = JSON.parse(content);
           
+          // Enhanced vocal validation with synonym mapping
+          function normalizeVocals(list = []) {
+            if (!list || list.length === 0) return ["No Vocals"];
+            
+            const normalized = [];
+            const vocalSet = new Set(ENVATO_TAXONOMY.vocals.map(v => v.toLowerCase()));
+            
+            for (const raw of list) {
+              if (!raw) continue;
+              const key = String(raw).trim().toLowerCase();
+              
+              // First try synonym mapping
+              let mapped = INSTRUMENT_SYNONYMS[key];
+              
+              // If no synonym, check if it's already valid
+              if (!mapped && vocalSet.has(key)) {
+                mapped = ENVATO_TAXONOMY.vocals.find(v => v.toLowerCase() === key);
+              }
+              
+              if (mapped) normalized.push(mapped);
+            }
+            
+            return normalized.length > 0 ? normalized : ["No Vocals"];
+          }
+          
           // Validate and normalize
           const validated = {
             mood: (creative.mood || []).filter(m => ENVATO_TAXONOMY.mood.includes(m)),
             genre: (creative.genre || []).filter(g => ENVATO_TAXONOMY.genre.includes(g)),
             theme: (creative.theme || []).filter(t => ENVATO_TAXONOMY.theme.includes(t)),
             instrument: normalizeInstruments(creative.instrument || []), // Use normalizer
-            vocals: (creative.vocals || []).filter(v => ENVATO_TAXONOMY.vocals.includes(v)),
+            vocals: normalizeVocals(creative.vocals), // Enhanced vocal normalization
             narrative: String(creative.narrative || 'No description available').slice(0, 200),
             confidence: Math.min(1, Math.max(0, Number(creative.confidence) || 0.5))
           };
