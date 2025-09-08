@@ -51,8 +51,8 @@ function hasExistingAnalysis(filePath) {
     const dir = path.dirname(filePath);
     const ext = path.extname(filePath);
     const baseName = path.basename(filePath, ext);
-    const jsonPath = path.join(dir, `${baseName}.rhythmdna.json`);
-    const csvPath = path.join(dir, `${baseName}.rhythmdna.csv`);
+    const jsonPath = path.join(dir, `${baseName}.json`);
+    const csvPath = path.join(dir, `${baseName}.csv`);
     // Return true if either JSON or CSV exists
     return fs.existsSync(jsonPath) || fs.existsSync(csvPath);
 }
