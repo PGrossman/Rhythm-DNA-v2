@@ -177,10 +177,36 @@ function setupAnalysisView() {
     if (dropZone) {
         dragDrop.setupDropZone(dropZone);
         
-        // Just add to queue on drop, don't process
+        // Just add to queue on drop, don't process (additive with dedupe)
         dropZone.addEventListener('filesDropped', (e) => {
-            console.log('[Renderer] Files dropped:', e.detail.tracks.length);
-            currentQueue = e.detail.tracks;
+            const incoming = Array.isArray(e.detail?.tracks) ? e.detail.tracks : [];
+            console.log('[Renderer] Files dropped:', incoming.length);
+            
+            // Merge additively by normalized absolute path; keep existing statuses
+            const normPath = (p) => String(p || '').replace(/\\/g,'/').toLowerCase();
+            const byPath = new Map();
+            
+            // Seed with existing items first (preserve their status fields)
+            for (const t of currentQueue) {
+                const key = normPath(t.path || t.fileName || t.filename);
+                if (key) byPath.set(key, t);
+            }
+            
+            // Add/merge incoming
+            for (const t of incoming) {
+                const key = normPath(t.path || t.fileName || t.filename);
+                if (!key) continue;
+                const existing = byPath.get(key);
+                if (existing) {
+                    // Augment flags; do NOT downgrade status
+                    if (t.hasExistingAnalysis) existing.hasExistingAnalysis = true;
+                    if (!existing.fileName && t.fileName) existing.fileName = t.fileName;
+                } else {
+                    byPath.set(key, t);
+                }
+            }
+            
+            currentQueue = Array.from(byPath.values());
             updateQueueDisplay();
         });
     }
