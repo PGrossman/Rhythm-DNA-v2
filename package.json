@@ -20,7 +20,8 @@
         "music-metadata": "^7.14.0",
         "music-tempo": "^1.0.3",
         "web-audio-beat-detector": "^8.2.30",
-        "bpm-detective": "^2.0.5"
+        "bpm-detective": "^2.0.5",
+        "@tensorflow/tfjs-node": "^4.20.0"
     }
 }
 
