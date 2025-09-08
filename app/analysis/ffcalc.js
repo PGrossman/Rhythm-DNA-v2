@@ -331,7 +331,12 @@ async function runCreativeAnalysis(baseName, bpm, loudness) {
       // Sound Design Elements (optional - can be included or separated)
       "Riser","Uplifter","Downlifter","Whoosh","Impact","Hit","Boom","Sub Drop","Reverse","Swell","Braam","Sweep","Noise FX"
     ],
-    vocals: ["No Vocals", "Background Vocals", "Female Vocals", "Lead Vocals", "Vocal Samples", "Male Vocals"]
+    vocals: ["No Vocals", "Background Vocals", "Female Vocals", "Lead Vocals", "Vocal Samples", "Male Vocals"],
+    // Lyric themes for when vocals are present
+    lyricThemes: ["Love/Relationships", "Inspiration/Motivation", "Party/Celebration", "Social Commentary", 
+                  "Personal Growth", "Nostalgia/Memory", "Freedom/Independence", "Heartbreak/Loss",
+                  "Adventure/Journey", "Dreams/Aspirations", "Rebellion/Protest", "Nature/Environment",
+                  "Spirituality/Faith", "Urban Life", "Youth/Coming of Age"]
   };
   
   // Synonym mapping for normalization
@@ -562,6 +567,7 @@ GENRE options: ${ENVATO_TAXONOMY.genre.join(', ')}
 THEME options: ${ENVATO_TAXONOMY.theme.join(', ')}
 INSTRUMENT options: ${ENVATO_TAXONOMY.instrument.join(', ')}
 VOCALS options: ${ENVATO_TAXONOMY.vocals.join(', ')}
+LYRIC THEMES (if vocals present): ${ENVATO_TAXONOMY.lyricThemes.join(', ')}
 
 Return ONLY a JSON object with this exact structure:
 {
@@ -570,8 +576,9 @@ Return ONLY a JSON object with this exact structure:
   "theme": ["1-2 themes from the list above"],
   "instrument": ["detected instruments from the list above - be comprehensive"],
   "vocals": ["MUST be one or more from: No Vocals, Background Vocals, Female Vocals, Male Vocals, Lead Vocals, Vocal Samples"],
-  "narrative": "A 40-60 word description of the track's musical character and emotional impact",
-  "confidence": 0.0-1.0
+  "lyricThemes": ["1-2 lyric themes IF vocals are present, otherwise empty array"],
+  "narrative": "A compelling 40-80 word description of the track's musical character, emotional impact, and sonic qualities",
+  "confidence": 0.85
 }
 
 CRITICAL: 
@@ -582,6 +589,8 @@ CRITICAL:
 - If you detect synthesizers, specify the type (Synth Pad, Synth Lead, etc.)
  - For vocals: ALWAYS include at least one vocal type. If no vocals detected, use ["No Vocals"]
  - If vocals are present, be specific: use "Lead Vocals" for main vocals, add "Male Vocals" or "Female Vocals" if identifiable
+ - Include lyricThemes ONLY if vocals are NOT "No Vocals", otherwise use empty array
+ - confidence must be a decimal number from 0.0 to 1.0 (do NOT use percentages like "85%")
  - Never leave vocals array empty
 Return ONLY valid JSON, no other text.`;
 
@@ -659,15 +668,31 @@ Based on the title and technical characteristics, provide your creative analysis
             return normalized.length > 0 ? normalized : ["No Vocals"];
           }
           
+          // Parse confidence (handle both number and "85%" string format)
+          function parseConfidence(raw) {
+            if (typeof raw === 'number') return raw > 1 ? raw / 100 : raw;
+            if (typeof raw === 'string') {
+              const cleaned = raw.replace('%', '').trim();
+              const num = parseFloat(cleaned);
+              if (Number.isFinite(num)) {
+                return num > 1 ? num / 100 : num;
+              }
+            }
+            return 0.7; // Default confidence
+          }
+          
           // Validate and normalize
+          const normalizedVocals = normalizeVocals(creative.vocals);
+          const hasVocals = !normalizedVocals.includes("No Vocals");
           const validated = {
             mood: (creative.mood || []).filter(m => ENVATO_TAXONOMY.mood.includes(m)),
             genre: (creative.genre || []).filter(g => ENVATO_TAXONOMY.genre.includes(g)),
             theme: (creative.theme || []).filter(t => ENVATO_TAXONOMY.theme.includes(t)),
             instrument: normalizeInstruments(creative.instrument || []), // Use normalizer
-            vocals: normalizeVocals(creative.vocals), // Enhanced vocal normalization
+            vocals: normalizedVocals, // Enhanced vocal normalization
+            lyricThemes: hasVocals ? (creative.lyricThemes || []).filter(t => ENVATO_TAXONOMY.lyricThemes.includes(t)) : [],
             narrative: String(creative.narrative || 'No description available').slice(0, 200),
-            confidence: Math.min(1, Math.max(0, Number(creative.confidence) || 0.5))
+            confidence: Math.min(1, Math.max(0, parseConfidence(creative.confidence)))
           };
           
           console.log(`[CREATIVE] Analysis complete - Genre: ${validated.genre.join(', ')}, Mood: ${validated.mood.join(', ')}, Instruments: ${validated.instrument.slice(0, 5).join(', ')}${validated.instrument.length > 5 ? '...' : ''}`);
@@ -796,6 +821,7 @@ async function analyzeMp3(filePath, win = null) {
     ['Theme', (analysis.creative?.theme || []).join(', ')],
     ['Instruments', (analysis.creative?.instrument || []).join(', ')],
     ['Vocals', (analysis.creative?.vocals || []).join(', ')],
+    ['Lyric Themes', (analysis.creative?.lyricThemes || []).join(', ')],
     ['Description', analysis.creative?.narrative || ''],
     ['Confidence', `${Math.round((analysis.creative?.confidence || 0) * 100)}%`]
   ];
