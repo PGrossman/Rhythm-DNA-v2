@@ -7,6 +7,7 @@ let yamnetPipe = null;
 
 async function ensureYamnet() {
 	if (yamnetPipe) return yamnetPipe;
+	const fs = require('node:fs');
 	const { pipeline, env } = await import('@xenova/transformers');
 	// Configure local cache directory; disable remote fetch at runtime
 	const modelsDir = path.resolve(process.cwd(), 'app', 'models', 'xenova');
@@ -14,13 +15,27 @@ async function ensureYamnet() {
 	env.localModelPath = modelsDir;
 	env.allowLocalModels = true;
 	env.allowRemoteModels = false;
+
+	// Verify files exist in the expected location
+	const repo = path.join(modelsDir, 'Xenova', 'yamnet');
+	const required = [
+		path.join(repo, 'config.json'),
+		path.join(repo, 'preprocessor_config.json'),
+		path.join(repo, 'onnx', 'model.onnx')
+	];
+	const missing = required.filter(f => !fs.existsSync(f));
+	if (missing.length > 0) {
+		console.log('[YAMNET] Missing files:', missing);
+		console.log('[YAMNET] Run: npm run get-yamnet');
+		return null;
+	}
+
 	try {
-		yamnetPipe = await pipeline('audio-classification', 'Xenova/yamnet');
-		console.log('[YAMNET] Pipeline loaded from cache');
+		yamnetPipe = await pipeline('audio-classification', repo);
+		console.log('[YAMNET] Loaded from', repo);
 		return yamnetPipe;
 	} catch (e) {
 		console.log('[YAMNET] Failed to load pipeline:', e.message);
-		console.log('[YAMNET] Run once with internet: npm run warm-models');
 		return null;
 	}
 }

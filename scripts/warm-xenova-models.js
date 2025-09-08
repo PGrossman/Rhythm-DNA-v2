@@ -14,10 +14,17 @@ const fs = require('node:fs');
   }
 
   const { pipeline, env } = await import('@xenova/transformers');
+  const token = process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN || process.env.HF_API_TOKEN || '';
   env.cacheDir = modelsDir;
   env.localModelPath = modelsDir;
   env.allowLocalModels = true;
   env.allowRemoteModels = true; // allow network for warm-up
+  if (token) {
+    env.HF_TOKEN = token;
+    console.log('Using HF token from environment.');
+  } else {
+    console.log('No HF token found in env (HF_TOKEN). Proceeding without auth...');
+  }
 
   console.log('Cache directory:', modelsDir);
   try {
@@ -26,7 +33,9 @@ const fs = require('node:fs');
     console.log('✓ YAMNet model cached successfully');
   } catch (e) {
     console.error('✗ Failed to download YAMNet:', e.message);
-    console.error('Make sure you have internet access and try again.');
+    console.error('If the error is Unauthorized, set a Hugging Face token and retry:');
+    console.error('  export HF_TOKEN=hf_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX');
+    console.error('Then run: npm run warm-models');
     process.exit(1);
   }
 

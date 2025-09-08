@@ -6,6 +6,7 @@
         "start": "npx electron-forge start",
         "package": "npx electron-forge package",
         "warm-models": "node scripts/warm-xenova-models.js",
+        "get-yamnet": "bash scripts/get-yamnet.sh",
         "install-models": "node scripts/install-models.js",
         "setup-yamnet": "node scripts/setup-yamnet.js"
     },
