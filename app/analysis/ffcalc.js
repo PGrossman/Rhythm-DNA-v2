@@ -524,23 +524,6 @@ async function runCreativeAnalysis(baseName, bpm, loudness, model = 'qwen3:8b') 
     "steel drums": "Steelpan (Steel Drum)",
     "steelpan": "Steelpan (Steel Drum)",
     
-    // Vocal synonyms - CRITICAL for reliable detection
-    "lead vocal": "Lead Vocals",
-    "lead singer": "Lead Vocals", 
-    "singer": "Lead Vocals",
-    "vox": "Lead Vocals",
-    "lead vox": "Lead Vocals",
-    "main vocal": "Lead Vocals",
-    "male vocal": "Male Vocals",
-    "male singer": "Male Vocals",
-    "female vocal": "Female Vocals",
-    "female singer": "Female Vocals",
-    "backing vocals": "Background Vocals",
-    "backing vocal": "Background Vocals",
-    "bg vocals": "Background Vocals",
-    "vocal sample": "Vocal Samples",
-    "vocal chops": "Vocal Samples",
-    
     // Sound Design
     "riser": "Riser",
     "risers": "Riser",
@@ -601,6 +584,25 @@ async function runCreativeAnalysis(baseName, bpm, loudness, model = 'qwen3:8b') 
     });
   }
   
+  // SEPARATE Vocal synonyms map - DO NOT mix with instruments
+  const VOCAL_SYNONYMS = {
+    "lead vocal": "Lead Vocals",
+    "lead singer": "Lead Vocals",
+    "singer": "Lead Vocals",
+    "vox": "Lead Vocals",
+    "lead vox": "Lead Vocals",
+    "main vocal": "Lead Vocals",
+    "male vocal": "Male Vocals",
+    "male singer": "Male Vocals",
+    "female vocal": "Female Vocals",
+    "female singer": "Female Vocals",
+    "backing vocals": "Background Vocals",
+    "backing vocal": "Background Vocals",
+    "bg vocals": "Background Vocals",
+    "vocal sample": "Vocal Samples",
+    "vocal chops": "Vocal Samples"
+  };
+
   // Build comprehensive prompt with expanded taxonomy
   const systemPrompt = `You are an expert music analyst. Analyze the track based on its metadata and categorize it using ONLY these specific values:
 
@@ -716,8 +718,8 @@ Based on the title and technical characteristics, provide your creative analysis
               if (!raw) continue;
               const key = String(raw).trim().toLowerCase();
               
-              // First try synonym mapping
-              let mapped = INSTRUMENT_SYNONYMS[key];
+              // First try VOCAL synonym mapping (not instrument!)
+              let mapped = VOCAL_SYNONYMS[key];
               
               // If no synonym, check if it's already valid
               if (!mapped && vocalSet.has(key)) {
@@ -727,7 +729,9 @@ Based on the title and technical characteristics, provide your creative analysis
               if (mapped) normalized.push(mapped);
             }
             
-            return normalized.length > 0 ? normalized : ["No Vocals"];
+            // Remove duplicates and return
+            const unique = Array.from(new Set(normalized));
+            return unique.length > 0 ? unique : ["No Vocals"];
           }
           
           // Parse confidence (handle both number and "85%" string format)
