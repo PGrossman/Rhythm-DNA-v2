@@ -288,7 +288,7 @@ async function checkWavExists(mp3Path) {
 }
 
 // Full creative analysis with Envato taxonomy
-async function runCreativeAnalysis(baseName, bpm, loudness) {
+async function runCreativeAnalysis(baseName, bpm, loudness, model = 'qwen3:8b') {
   console.log('[CREATIVE] Running full creative analysis...');
   
   // Expanded Envato taxonomy with comprehensive instruments
@@ -601,8 +601,12 @@ Loudness: ${loudness || 'Unknown'} LUFS
 
 Based on the title and technical characteristics, provide your creative analysis. Be thorough in identifying instruments.`;
 
+  // Use the model passed from settings, with lower temperature for advanced models
+  const isAdvancedModel = model.includes('qwen2.5') || model.includes('gemma2') || model.includes('mixtral');
+  const temperature = isAdvancedModel ? 0.3 : 0.7;
+  
   const payload = JSON.stringify({
-    model: 'qwen3:8b',
+    model: model,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
@@ -610,10 +614,12 @@ Based on the title and technical characteristics, provide your creative analysis
     stream: false,
     format: 'json',
     options: { 
-      temperature: 0.7,
+      temperature: temperature,
       top_p: 0.9
     }
   });
+  
+  console.log(`[CREATIVE] Using model: ${model} (temp: ${temperature})`);
 
   return new Promise((resolve) => {
     const http = require('http');
@@ -725,7 +731,7 @@ function getDefaultCreative() {
   };
 }
 
-async function analyzeMp3(filePath, win = null) {
+async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
   const baseName = path.basename(filePath, path.extname(filePath));
   // Send technical starting event
   if (win) {
@@ -760,7 +766,7 @@ async function analyzeMp3(filePath, win = null) {
   const dir = path.dirname(filePath);
   
   // Run full creative analysis
-  const creativeResult = await runCreativeAnalysis(baseName, tempo, loudness?.lufs_integrated);
+  const creativeResult = await runCreativeAnalysis(baseName, tempo, loudness?.lufs_integrated, model);
   const creative = creativeResult.data;
   const creativeStatus = creativeResult.offline 
     ? 'Ollama offline - creative analysis skipped'

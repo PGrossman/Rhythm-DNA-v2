@@ -66,9 +66,15 @@ const views = {
             <div style="margin-bottom: 16px;">
                 <label style="display: block; margin-bottom: 8px;">Creative Analysis Model</label>
                 <select id="ollama-model" style="width: 100%; padding: 8px 12px; border: 1px solid #d0d0d0; border-radius: 4px;">
-                    <option value="qwen3:30b">qwen3:30b (Better Quality)</option>
-                    <option value="qwen3:8b">qwen3:8b (Fast)</option>
+                    <option value="qwen2.5:32b-instruct">Qwen2.5 32B Instruct (Most Accurate)</option>
+                    <option value="gemma2:27b-instruct">Gemma 2 27B Instruct (Very Accurate)</option>
+                    <option value="mixtral:8x7b">Mixtral 8x7B (Accurate)</option>
+                    <option value="qwen3:30b">Qwen3 30B (Better Quality)</option>
+                    <option value="qwen3:8b">Qwen3 8B (Fast, Default)</option>
                 </select>
+                <div style="margin-top: 8px; font-size: 12px; color: #666;">
+                    Note: Larger models require more RAM and take longer but provide better accuracy
+                </div>
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
                 <div>
@@ -99,7 +105,7 @@ async function setupSettingsView() {
         const settings = await window.api.getSettings();
         if (settings.dbFolder) document.getElementById('db-folder').value = settings.dbFolder;
         document.getElementById('auto-update-db').checked = settings.autoUpdateDb || false;
-        document.getElementById('ollama-model').value = settings.ollamaModel || 'qwen3:30b';
+        document.getElementById('ollama-model').value = settings.ollamaModel || 'qwen3:8b';
         document.getElementById('tech-concurrency').value = settings.techConcurrency || 4;
         document.getElementById('creative-concurrency').value = settings.creativeConcurrency || 2;
     } catch (err) {

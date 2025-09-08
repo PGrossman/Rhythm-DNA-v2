@@ -14,7 +14,7 @@ if (!app.requestSingleInstanceLock()) {
 let settings = {
     dbFolder: '',
     autoUpdateDb: false,
-    ollamaModel: 'qwen3:30b',
+    ollamaModel: 'qwen3:8b',
     techConcurrency: 4,
     creativeConcurrency: 2
 };
@@ -200,7 +200,7 @@ const createWindow = () => {
             console.log('[MAIN] Analyzing:', filePath);
             // Pass the window to send progress events
             const { analyzeMp3 } = require('./analysis/ffcalc.js');
-            const result = await analyzeMp3(filePath, win);
+            const result = await analyzeMp3(filePath, win, settings.ollamaModel);
             console.log('[MAIN] Analysis complete:', result.jsonPath);
             
             // Upsert into Main DB and optionally update criteria
