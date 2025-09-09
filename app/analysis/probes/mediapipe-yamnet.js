@@ -51,7 +51,14 @@ function ffmpegDecodeToTensor(filePath, startSec, durSec, sr = 16000) {
 
 function scoreOf(list, name) {
 	const n = String(name).toLowerCase();
-	return list.find(x => String(x.label).toLowerCase() === n)?.score ?? 0;
+	let best = 0;
+	for (const x of list) {
+		const lbl = String(x.label).toLowerCase();
+		if (lbl === n || lbl.includes(n) || n.includes(lbl)) {
+			if (x.score > best) best = x.score;
+		}
+	}
+	return best;
 }
 
 async function probeYamnet(filePath, durationSec, opts = {}) {
