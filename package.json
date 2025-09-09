@@ -6,6 +6,7 @@
         "start": "npx electron-forge start",
         "package": "npx electron-forge package",
         "get-ast": "bash scripts/get-ast.sh",
+        "get-clap": "bash scripts/get-clap.sh",
         "warm-models": "node scripts/warm-xenova-models.js",
         "warm-clap": "node scripts/warm-clap.js",
         "get-yamnet": "bash scripts/get-yamnet.sh",
