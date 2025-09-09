@@ -775,6 +775,15 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
   let id3Tags = {};
   try {
     const metadata = await mm.parseFile(filePath);
+    // Helper to find ID3v2 frame across versions
+    const findFrame = (id) => {
+      for (const version of ['ID3v2.4', 'ID3v2.3', 'ID3v2.2']) {
+        const frame = metadata.native?.[version]?.find?.(t => t.id === id);
+        if (frame) return frame.value;
+      }
+      return null;
+    };
+
     id3Tags = {
       title: metadata.common.title || baseName,
       artist: metadata.common.artist || '',
@@ -784,11 +793,13 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
       genre: metadata.common.genre || [],
       track: metadata.common.track?.no || null,
       comment: (metadata.common.comment && metadata.common.comment[0]) || '',
-      bpm: (metadata.native?.['ID3v2.4']?.find?.(t => t.id === 'TBPM')?.value) ||
-           (metadata.native?.['ID3v2.3']?.find?.(t => t.id === 'TBPM')?.value) || null,
-      key: (metadata.native?.['ID3v2.4']?.find?.(t => t.id === 'TKEY')?.value) ||
-           (metadata.native?.['ID3v2.3']?.find?.(t => t.id === 'TKEY')?.value) || '' ,
-      composer: (metadata.common.composer && metadata.common.composer[0]) || ''
+      bpm: findFrame('TBPM') ? parseFloat(findFrame('TBPM')) : null,
+      key: findFrame('TKEY') || '',
+      composer: (metadata.common.composer && metadata.common.composer[0]) || '',
+      copyright: metadata.common.copyright || '',
+      encodedby: metadata.common.encodedby || '',
+      mood: findFrame('TMOO') || '',
+      energy: findFrame('TENE') || ''
     };
     console.log('[ID3] Tags extracted:', JSON.stringify(id3Tags, null, 2));
   } catch (e) {

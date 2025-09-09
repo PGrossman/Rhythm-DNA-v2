@@ -29,6 +29,18 @@ function orHints(a = {}, b = {}) {
     return out;
 }
 
+// Suppress false positives in merged hints using probe scores when available
+function cleanHints(hints, scores = {}) {
+    // Suppress banjo if guitar/electric guitar is clearly stronger
+    if (hints.banjo && hints.guitar) {
+        const banjoScore = scores.banjo || 0;
+        const guitarScore = Math.max(scores.guitar || 0, scores['electric guitar'] || 0);
+        if (guitarScore > banjoScore * 1.5) {
+            hints.banjo = false;
+        }
+    }
+    return hints;
+}
 
 async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 	// Wider intro window to catch early horns (around ~12-27s)
@@ -106,7 +118,8 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 		orHints(clapIntro.hints, clapMiddle.hints),
 		orHints(clapOutro.hints, orHints(intro.hints, orHints(middle.hints, outro.hints)))
 	);
-    // No zero-shot post-processing
+    const allScores = Object.assign({}, clapIntro.scores || {}, clapMiddle.scores || {}, clapOutro.scores || {});
+    cleanHints(hints, allScores);
 
 	const status = (intro.status === 'ok' || middle.status === 'ok' || outro.status === 'ok') ? 'ok' : 'skipped';
 	console.log(`[AUDIO_PROBE] Status: ${status}, Hints:`, hints);

@@ -55,44 +55,79 @@ async function ensureCLAP() {
 	}
 }
 
-const LABELS = [
-	'brass section','trumpet','trombone','saxophone',
-	'violin','cello','double bass','string section',
-	'piano','organ','keyboard','accordion',
-	'electric guitar','acoustic guitar','bass guitar','banjo','ukulele',
-	'drums','drum kit','percussion',
-	'flute','clarinet','harmonica',
-	'bells','harp','synthesizer','vocals'
-];
+// Expanded vocabulary and thresholds
+const VOCAB = {
+	piano: ['piano', 'acoustic piano', 'grand piano', 'upright piano'],
+	'acoustic guitar': ['acoustic guitar', 'classical guitar', 'folk guitar'],
+	violin: ['violin', 'fiddle', 'string violin'],
+	bass: ['bass guitar', 'electric bass', 'bass'],
+	cello: ['cello', 'violoncello'],
+	drums: ['drum kit', 'drums', 'snare drum', 'kick drum', 'cymbals'],
+	percussion: ['percussion', 'tambourine', 'shaker', 'conga', 'bongo'],
+	'electric guitar': ['electric guitar', 'distorted guitar', 'rock guitar'],
+	accordion: ['accordion', 'squeezebox'],
+	banjo: ['banjo'],
+	bells: ['bells', 'tubular bells', 'chimes', 'glockenspiel'],
+	brass: ['brass section', 'horn section', 'brass instruments'],
+	clarinet: ['clarinet'],
+	'double bass': ['double bass', 'upright bass', 'contrabass'],
+	flute: ['flute'],
+	harmonica: ['harmonica', 'mouth organ'],
+	harp: ['harp'],
+	keyboard: ['keyboard', 'electric piano', 'synthesizer keyboard'],
+	mallets: ['xylophone', 'marimba', 'vibraphone', 'mallet percussion'],
+	organ: ['organ', 'hammond organ', 'church organ'],
+	saxophone: ['saxophone', 'sax', 'alto sax', 'tenor sax'],
+	strings: ['string section', 'strings', 'orchestral strings'],
+	synth: ['synthesizer', 'synth', 'analog synth'],
+	trumpet: ['trumpet', 'cornet'],
+	trombone: ['trombone'],
+	ukulele: ['ukulele'],
+	woodwinds: ['woodwinds', 'wind instruments'],
+	vocals: ['vocals', 'singing', 'voice', 'vocal']
+};
 
-function toHints(scores) {
-	const get = (k) => (scores[k] ?? 0);
-	return {
-		brass: Math.max(get('brass section'), get('trumpet'), get('trombone')) >= 0.15,
-		trumpet: get('trumpet') >= 0.15,
-		trombone: get('trombone') >= 0.15,
-		saxophone: get('saxophone') >= 0.15,
-		strings: Math.max(get('violin'), get('cello'), get('string section')) >= 0.15,
-		violin: get('violin') >= 0.15,
-		cello: get('cello') >= 0.15,
-		piano: get('piano') >= 0.15,
-		organ: get('organ') >= 0.15,
-		keyboard: get('keyboard') >= 0.15,
-		accordion: get('accordion') >= 0.15,
-		guitar: Math.max(get('electric guitar'), get('acoustic guitar')) >= 0.15,
-		bass: Math.max(get('bass guitar'), get('double bass')) >= 0.15,
-		banjo: get('banjo') >= 0.15,
-		ukulele: get('ukulele') >= 0.15,
-		drumkit: Math.max(get('drums'), get('drum kit')) >= 0.15,
-		percussion: get('percussion') >= 0.15,
-		flute: get('flute') >= 0.15,
-		clarinet: get('clarinet') >= 0.15,
-		harmonica: get('harmonica') >= 0.15,
-		bells: get('bells') >= 0.15,
-		harp: get('harp') >= 0.15,
-		synth: get('synthesizer') >= 0.15,
-		vocals: get('vocals') >= 0.15
-	};
+const THRESHOLDS = {
+	piano: 0.10,
+	'acoustic guitar': 0.10,
+	violin: 0.10,
+	bass: 0.08,
+	cello: 0.08,
+	drums: 0.10,
+	percussion: 0.12,
+	'electric guitar': 0.08,
+	accordion: 0.10,
+	banjo: 0.20,
+	bells: 0.10,
+	brass: 0.15,
+	clarinet: 0.12,
+	'double bass': 0.12,
+	flute: 0.12,
+	harmonica: 0.12,
+	harp: 0.12,
+	keyboard: 0.10,
+	mallets: 0.12,
+	organ: 0.10,
+	saxophone: 0.12,
+	strings: 0.10,
+	synth: 0.10,
+	trumpet: 0.15,
+	trombone: 0.08,
+	ukulele: 0.15,
+	woodwinds: 0.12,
+	vocals: 0.08
+};
+
+function buildLabels() {
+	const labels = [];
+	const reverse = {};
+	for (const [canonical, prompts] of Object.entries(VOCAB)) {
+		for (const prompt of prompts) {
+			labels.push(prompt);
+			reverse[prompt] = canonical;
+		}
+	}
+	return { labels, reverse };
 }
 
 async function probeCLAP(filePath, durationSec, opts = {}) {
@@ -105,20 +140,31 @@ async function probeCLAP(filePath, durationSec, opts = {}) {
 		const center = Math.max(0, Math.min(durationSec, centerFrac * durationSec));
 		const start = Math.max(0, Math.min(durationSec - winSec, center - winSec / 2));
 
-		const { array, sampling_rate } = await ffmpegToF32(filePath, start, winSec, 48000);
+		const { array } = await ffmpegToF32(filePath, start, winSec, 48000);
+		const { labels, reverse } = buildLabels();
 
-		// Pass audio and labels as separate params
-		const out = await pipe(
-			array,
-			LABELS,
-			{ hypothesis_template: 'This is a sound of {}.' }
-		);
+		const out = await pipe(array, labels, { hypothesis_template: 'This is a sound of {}.' });
 
-		const scores = Object.fromEntries(out.map(x => [String(x.label).toLowerCase(), Number(x.score)]));
-		const topLabels = out.slice(0, 10).map(x => `${x.label}:${x.score.toFixed(3)}`);
-		console.log('[CLAP] Top scores:', topLabels.join(', '));
-		const hints = toHints(scores);
-		return { status: 'ok', hints, labels: out.map(x => x.label), scores, meta: { startSec: start, winSec } };
+		// Aggregate scores by canonical name
+		const scores = {};
+		for (const item of out) {
+			const canonical = reverse[item.label] || item.label;
+			scores[canonical] = Math.max(scores[canonical] || 0, item.score);
+		}
+
+		// Apply thresholds to build hints
+		const hints = {};
+		for (const [key, score] of Object.entries(scores)) {
+			const threshold = THRESHOLDS[key] || 0.10;
+			hints[key] = score >= threshold;
+		}
+
+		const topScores = Object.entries(scores)
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, 10)
+			.map(([k, v]) => `${k}:${v.toFixed(3)}`);
+		console.log('[CLAP] Top scores:', topScores.join(', '));
+		return { status: 'ok', hints, scores, meta: { startSec: start, winSec } };
 	} catch (e) {
 		console.log('[CLAP] Error:', e.message);
 		return { status: 'skipped', error: e.message };
