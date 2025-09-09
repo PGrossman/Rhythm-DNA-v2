@@ -36,7 +36,7 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 	let intro = { status: 'skipped' };
 	try {
 		intro = await withTimeout(
-			probeYamnet(filePath, durationSec, { winSec: introLen, anchorSec: 35 }),
+			probeYamnet(filePath, durationSec, { winSec: 10, anchorSec: 17 }),
 			15000,
 			'ast-intro'
 		);
