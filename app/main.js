@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsPromises = require('node:fs/promises');
@@ -244,6 +244,80 @@ const createWindow = () => {
         } catch (error) {
             console.error('[MAIN] Analysis failed:', error);
             return { success: false, error: error.message };
+        }
+    });
+    
+    // Search IPC handlers
+    ipcMain.handle('search:getDB', async () => {
+        try {
+            const dbFolder = settings.dbFolder || path.join(app.getPath('userData'), 'RhythmDNA');
+            const criteriaPath = path.join(dbFolder, 'criteria.db.json');
+            const songsPath = path.join(dbFolder, 'songs.db.json');
+            
+            if (!fs.existsSync(criteriaPath) || !fs.existsSync(songsPath)) {
+                return { success: false, error: 'Database files not found' };
+            }
+            
+            const criteria = JSON.parse(await fsPromises.readFile(criteriaPath, 'utf8'));
+            const songs = JSON.parse(await fsPromises.readFile(songsPath, 'utf8'));
+            
+            return { success: true, criteria, songs };
+        } catch (e) {
+            console.error('[MAIN] search:getDB error:', e);
+            return { success: false, error: e.message };
+        }
+    });
+    
+    ipcMain.handle('search:showFile', async (_e, filePath) => {
+        shell.showItemInFolder(filePath);
+        return { success: true };
+    });
+    
+    ipcMain.handle('search:getVersions', async (_e, filePath) => {
+        try {
+            const dir = path.dirname(filePath);
+            const base = path.basename(filePath, path.extname(filePath));
+            const root = base.replace(/\s*\([^)]*\)\s*/g, '').toLowerCase();
+            
+            const files = await fsPromises.readdir(dir);
+            const versions = files.filter(f => {
+                const name = path.basename(f, path.extname(f)).toLowerCase();
+                return name.includes(root);
+            });
+            
+            const exts = versions.map(f => path.extname(f).toLowerCase());
+            return {
+                success: true,
+                count: versions.length,
+                hasWav: exts.includes('.wav'),
+                hasMp3: exts.includes('.mp3')
+            };
+        } catch (e) {
+            return { success: false, count: 1 };
+        }
+    });
+    
+    ipcMain.handle('search:readJson', async (_e, absPath) => {
+        const data = await fsPromises.readFile(absPath, 'utf8');
+        return JSON.parse(data);
+    });
+    
+    // Waveform PNG generation with lazy require to avoid circular imports
+    ipcMain.handle('waveform:get-png', async (_evt, absPath, opts = {}) => {
+        try {
+            const path = require('node:path');
+            const os = require('node:os');
+            const cacheRoot = opts.cacheRoot || 
+                path.join(os.homedir(), 'Library', 'Application Support', 'RhythmRNA', 'waveforms');
+            
+            // LAZY require - only loads when handler runs, avoiding circular deps
+            const { ensureWaveformPNG } = require('./lib/waveform-png.cjs');
+            
+            const png = await ensureWaveformPNG(absPath, cacheRoot);
+            return { ok: true, png };
+        } catch (e) {
+            console.error('[WAVEFORM IPC] Error:', e.message);
+            return { ok: false, error: e.message };
         }
     });
 };

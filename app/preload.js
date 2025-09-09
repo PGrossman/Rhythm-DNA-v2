@@ -16,6 +16,13 @@ contextBridge.exposeInMainWorld('api', {
 	runHealthCheck: () => ipcRenderer.invoke('runHealthCheck'),
 	chooseFolder: () => ipcRenderer.invoke('chooseFolder'),
 	analyzeFile: (path) => ipcRenderer.invoke('analyzeFile', path),
+	
+	// Search methods
+	searchGetDB: () => ipcRenderer.invoke('search:getDB'),
+	searchShowFile: (path) => ipcRenderer.invoke('search:showFile', path),
+	searchGetVersions: (path) => ipcRenderer.invoke('search:getVersions', path),
+	searchReadJson: (path) => ipcRenderer.invoke('search:readJson', path),
+	getWaveformPng: (absPath, options) => ipcRenderer.invoke('waveform:get-png', absPath, options),
 
 	// Event listeners (Main → Renderer)
 	onQueueUpdate: (callback) => ipcRenderer.on('queueUpdate', callback),

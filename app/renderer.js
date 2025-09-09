@@ -30,9 +30,21 @@ const views = {
         <div id="queue-display"></div>
     `,
     search: `
-        <h2>Search</h2>
-        <div class="queue-empty">
-            <p>Search functionality will be available after analysis</p>
+        <div id="search-container" style="height: calc(100vh - 120px); display: flex; gap: 16px;">
+            <aside style="width: 34%; max-width: 440px; border-right: 1px solid #ddd; padding-right: 12px; overflow-y: auto;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                    <h2 style="margin: 0;">Search</h2>
+                    <div>
+                        <button id="btnClearFilters" style="padding: 6px 12px; background: #6b7280; color: white; border: none; border-radius: 4px; cursor: pointer; margin-right: 8px;">Clear</button>
+                        <button id="btnRunSearch" style="padding: 6px 12px; background: #007AFF; color: white; border: none; border-radius: 4px; cursor: pointer;">Search</button>
+                    </div>
+                </div>
+                <div id="filters"></div>
+            </aside>
+            <main style="flex: 1; min-width: 0; overflow-y: auto;">
+                <div id="searchStatus" style="padding: 16px; color: #666; font-style: italic;">Loading database...</div>
+                <div id="results"></div>
+            </main>
         </div>
     `,
     settings: `
@@ -173,6 +185,8 @@ const setView = (name) => {
     // Setup view-specific handlers
     if (name === 'analysis') {
         setupAnalysisView();
+    } else if (name === 'search') {
+        setupSearchView();
     } else if (name === 'settings') {
         setupSettingsView();
     }
@@ -428,6 +442,236 @@ window.api?.onQueueUpdate?.((event, data) => {
         updateQueueDisplay();
     }
 });
+
+// Search functionality
+let searchDB = null;
+let searchWaveforms = new Map();
+
+async function setupSearchView() {
+    const statusEl = document.getElementById('searchStatus');
+    const filtersEl = document.getElementById('filters');
+    const resultsEl = document.getElementById('results');
+
+    // Load database
+    const dbResult = await window.api.searchGetDB();
+    if (!dbResult.success) {
+        statusEl.textContent = 'No database found. Analyze some tracks first.';
+        return;
+    }
+
+    searchDB = dbResult;
+    statusEl.style.display = 'none';
+
+    // Build filters
+    renderSearchFilters(dbResult.criteria);
+
+    // Show 5 random tracks initially
+    const tracks = Object.values(dbResult.songs.tracks || {});
+    showRandomTracks(tracks, 5);
+
+    // Wire buttons
+    document.getElementById('btnRunSearch')?.addEventListener('click', runSearch);
+    document.getElementById('btnClearFilters')?.addEventListener('click', clearFilters);
+}
+
+function renderSearchFilters(criteria) {
+    const filtersEl = document.getElementById('filters');
+    if (!filtersEl) return;
+
+    filtersEl.innerHTML = '';
+    const categories = ['instrument', 'genre', 'mood', 'vocals', 'theme', 'tempoBands'];
+
+    categories.forEach(cat => {
+        const values = criteria[cat];
+        if (!Array.isArray(values) || values.length === 0) return;
+
+        const section = document.createElement('details');
+        section.style.marginBottom = '12px';
+
+        const summary = document.createElement('summary');
+        summary.textContent = cat.charAt(0).toUpperCase() + cat.slice(1);
+        summary.style.cursor = 'pointer';
+        summary.style.padding = '4px 0';
+        summary.style.fontWeight = '600';
+        section.appendChild(summary);
+
+        const content = document.createElement('div');
+        content.style.paddingLeft = '12px';
+        content.style.marginTop = '8px';
+
+        values.forEach(val => {
+            const label = document.createElement('label');
+            label.style.display = 'block';
+            label.style.padding = '3px 0';
+            label.style.cursor = 'pointer';
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = val;
+            cb.dataset.category = cat;
+            cb.style.marginRight = '8px';
+
+            const text = document.createElement('span');
+            text.textContent = val;
+            text.style.fontSize = '14px';
+
+            label.appendChild(cb);
+            label.appendChild(text);
+            content.appendChild(label);
+        });
+
+        section.appendChild(content);
+        filtersEl.appendChild(section);
+    });
+}
+
+function getSelectedFilters() {
+    const filters = {};
+    document.querySelectorAll('#filters input[type=checkbox]:checked').forEach(cb => {
+        const cat = cb.dataset.category;
+        if (!filters[cat]) filters[cat] = [];
+        filters[cat].push(cb.value);
+    });
+    return filters;
+}
+
+function matchTrack(track, filters) {
+    if (!filters || Object.keys(filters).length === 0) return true;
+
+    const creative = track.creative || {};
+
+    // AND logic across categories
+    for (const [cat, values] of Object.entries(filters)) {
+        const trackValues = creative[cat] || [];
+
+        // Check if track has ALL selected values for this category
+        for (const val of values) {
+            const found = trackValues.some(tv =>
+                String(tv).toLowerCase().includes(String(val).toLowerCase())
+            );
+            if (!found) return false;
+        }
+    }
+
+    return true;
+}
+
+function runSearch() {
+    if (!searchDB) return;
+
+    const filters = getSelectedFilters();
+    const tracks = Object.values(searchDB.songs.tracks || {});
+    const matches = tracks.filter(t => matchTrack(t, filters));
+
+    renderSearchResults(matches.slice(0, 30));
+}
+
+function clearFilters() {
+    document.querySelectorAll('#filters input[type=checkbox]').forEach(cb => {
+        cb.checked = false;
+    });
+
+    if (searchDB) {
+        const tracks = Object.values(searchDB.songs.tracks || {});
+        showRandomTracks(tracks, 5);
+    }
+}
+
+function showRandomTracks(tracks, count) {
+    const shuffled = [...tracks].sort(() => Math.random() - 0.5);
+    renderSearchResults(shuffled.slice(0, count));
+}
+
+function renderSearchResults(tracks) {
+    // Clean up old waveforms
+    searchWaveforms.forEach(ws => {
+        try { ws.destroy(); } catch {}
+    });
+    searchWaveforms.clear();
+
+    const resultsEl = document.getElementById('results');
+    if (!resultsEl) return;
+
+    resultsEl.innerHTML = '';
+
+    if (!tracks || tracks.length === 0) {
+        resultsEl.innerHTML = '<p style="padding:20px; color:#666;">No matches found.</p>';
+        return;
+    }
+
+    tracks.forEach(track => {
+        const card = document.createElement('div');
+        card.style.cssText = 'border:1px solid #ddd; border-radius:8px; padding:12px; margin:0 16px 12px 16px; background:white;';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;';
+
+        const title = document.createElement('strong');
+        const trackName = track.title || track.baseName || 'Unknown Track';
+        title.textContent = trackName;
+
+        const showBtn = document.createElement('button');
+        showBtn.textContent = 'Show in Finder';
+        showBtn.style.cssText = 'padding:4px 8px; background:#007AFF; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px;';
+        showBtn.onclick = () => {
+            const filePath = track.path || track.file;
+            if (filePath) window.api.searchShowFile(filePath);
+        };
+
+        header.appendChild(title);
+        header.appendChild(showBtn);
+        card.appendChild(header);
+
+        const waveDiv = document.createElement('div');
+        waveDiv.style.cssText = 'height:60px; margin:8px 0; background:#f5f5f5; border-radius:4px;';
+        card.appendChild(waveDiv);
+
+        const info = document.createElement('div');
+        info.style.cssText = 'font-size:12px; color:#666;';
+        info.textContent = 'Loading...';
+        card.appendChild(info);
+
+        // Load waveform
+        const filePath = track.path || track.file;
+        if (filePath && window.WaveSurfer) {
+            try {
+                const ws = window.WaveSurfer.create({
+                    container: waveDiv,
+                    height: 60,
+                    waveColor: '#9ca3af',
+                    progressColor: '#3b82f6',
+                    cursorColor: '#1f2937',
+                    barWidth: 2,
+                    barGap: 1,
+                    interact: true,
+                    normalize: true
+                });
+
+                ws.load(filePath);
+                searchWaveforms.set(track, ws);
+
+                ws.on('ready', () => {
+                    info.textContent = `${track.estimated_tempo_bpm || 'Unknown'} BPM • ${track.creative?.genre?.join(', ') || 'Unknown genre'}`;
+                });
+
+                ws.on('click', () => {
+                    if (ws.isPlaying()) {
+                        ws.pause();
+                    } else {
+                        ws.play();
+                    }
+                });
+            } catch (e) {
+                console.error('WaveSurfer error:', e);
+                info.textContent = 'Waveform unavailable';
+            }
+        } else {
+            info.textContent = 'Waveform not available';
+        }
+
+        resultsEl.appendChild(card);
+    });
+}
 
 // Tab navigation
 document.getElementById('tab-analysis-btn').addEventListener('click', () => setView('analysis'));

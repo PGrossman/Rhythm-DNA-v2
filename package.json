@@ -11,7 +11,8 @@
         "warm-clap": "node scripts/warm-clap.js",
         "get-yamnet": "bash scripts/get-yamnet.sh",
         "install-models": "node scripts/install-models.js",
-        "setup-yamnet": "node scripts/setup-yamnet.js"
+        "setup-yamnet": "node scripts/setup-yamnet.js",
+        "wf:test": "node scripts/test-wf.cjs"
     },
     "devDependencies": {
         "@electron-forge/cli": "^6.4.0",
