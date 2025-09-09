@@ -30,17 +30,17 @@ function orHints(a = {}, b = {}) {
 
 
 async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
-	// Three-window strategy: Intro (20-30s), Middle (50%), Outro (70%)
-	const introLen = Math.min(30, Math.max(20, durationSec / 3));
+	// Wider intro window to catch early horns (around ~12-27s)
+	const introLen = Math.min(30, Math.max(12, Math.floor(durationSec * 0.12)));
 
 	let intro = { status: 'skipped' };
 	try {
 		intro = await withTimeout(
-			probeYamnet(filePath, durationSec, { winSec: 10, anchorSec: 17 }),
+			probeYamnet(filePath, durationSec, { winSec: introLen, centerFrac: 0.10, bandpass: true }),
 			15000,
 			'ast-intro'
 		);
-		console.log('[PROBE] Intro labels:', intro.labels?.slice(0, 5));
+		if (intro.labels) console.log('[PROBE] Intro labels:', intro.labels.slice(0, 10));
 	} catch (e) {
 		intro = { status: 'skipped', error: String(e.message || e) };
 	}
@@ -48,10 +48,11 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 	let middle = { status: 'skipped' };
 	try {
 		middle = await withTimeout(
-			probeYamnet(filePath, durationSec, { winSec: 6, centerFrac: 0.50 }),
-			12000,
+			probeYamnet(filePath, durationSec, { winSec: 6, centerFrac: 0.50, bandpass: true }),
+			15000,
 			'ast-middle'
 		);
+		if (middle.labels) console.log('[PROBE] Middle labels:', middle.labels.slice(0, 10));
 	} catch (e) {
 		middle = { status: 'skipped', error: String(e.message || e) };
 	}
@@ -59,10 +60,11 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 	let outro = { status: 'skipped' };
 	try {
 		outro = await withTimeout(
-			probeYamnet(filePath, durationSec, { winSec: 6, centerFrac: 0.70 }),
-			12000,
+			probeYamnet(filePath, durationSec, { winSec: 8, centerFrac: 0.92, bandpass: true }),
+			15000,
 			'ast-outro'
 		);
+		if (outro.labels) console.log('[PROBE] Outro labels:', outro.labels.slice(0, 10));
 	} catch (e) {
 		outro = { status: 'skipped', error: String(e.message || e) };
 	}

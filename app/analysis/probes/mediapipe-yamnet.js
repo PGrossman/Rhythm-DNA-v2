@@ -24,12 +24,13 @@ async function ensureAudioClassifier() {
 	return audioPipe;
 }
 
-function ffmpegDecodeToTensor(filePath, startSec, durSec, sr = 16000) {
+function ffmpegDecodeToTensor(filePath, startSec, durSec, sr = 16000, afChain = '') {
 	return new Promise((resolve, reject) => {
 		const args = [
 			'-ss', String(startSec),
 			'-t', String(durSec),
 			'-i', filePath,
+			...(afChain ? ['-af', afChain] : []),
 			'-ac', '1', '-ar', String(sr),
 			'-f', 'f32le',
 			'-hide_banner', '-loglevel', 'error',
@@ -65,6 +66,7 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 	const winSec = opts.winSec ?? 6;
 	const centerFrac = opts.centerFrac ?? 0.35;
 	const anchorSec = opts.anchorSec;
+	const bandpass = Boolean(opts.bandpass);
 	
 	const center = (anchorSec != null)
 		? Math.max(0, Math.min(durationSec, anchorSec))
@@ -75,25 +77,42 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 		const pipe = await ensureAudioClassifier();
 		if (!pipe) return { status: 'skipped', error: 'Pipeline unavailable' };
 		
-		const input = await ffmpegDecodeToTensor(filePath, start, winSec, 16000);
+		// Optional band-pass to emphasize horn region ~600-3800 Hz
+		const afChain = bandpass ? 'highpass=f=600,lowpass=f=3800' : '';
+		const input = await ffmpegDecodeToTensor(filePath, start, winSec, 16000, afChain);
 		const results = await pipe(input.array, { sampling_rate: input.sampling_rate });
 		const top = results.slice(0, 25);
 		// Debug: show the top few labels and scores
 		console.log('[DEBUG] Top scores:', top.slice(0, 5).map(x => `${x.label}:${x.score.toFixed(3)}`));
 		
+		// Alias-based flexible matching
+		const ALIASES = {
+			vocals: ['vocal', 'vocal music', 'singing', 'speech', 'singer'],
+			brass: ['brass instrument', 'horn', 'trumpet', 'trombone', 'saxophone'],
+			trumpet: ['trumpet'],
+			trombone: ['trombone'],
+			saxophone: ['saxophone', 'sax'],
+			drumkit: ['drum kit', 'drum', 'snare drum', 'percussion'],
+			guitar: ['electric guitar', 'acoustic guitar', 'guitar', 'plucked string instrument'],
+			piano: ['piano'],
+			organ: ['organ', 'hammond organ'],
+			bass: ['bass guitar', 'electric bass', 'bass']
+		};
+		
 		const s = (n) => scoreOf(top, n);
+		const sAny = (arr) => Math.max(0, ...arr.map(s));
 		const hints = {
-			// Lower thresholds temporarily to inspect model behavior
-			vocals: (s('Speech') >= 0.05) || (s('Vocal') >= 0.05) || (s('Singing') >= 0.05),
-			brass: (s('Brass') >= 0.05) || (s('Horn') >= 0.05),
-			trumpet: s('Trumpet') >= 0.05,
-			trombone: s('Trombone') >= 0.05,
-			saxophone: (s('Saxophone') >= 0.05) || (s('Sax') >= 0.05),
-			drumkit: (s('Drum') >= 0.05) || (s('Drum kit') >= 0.05) || (s('Snare') >= 0.05),
-			guitar: s('Guitar') >= 0.05,
-			piano: s('Piano') >= 0.05,
-			organ: s('Organ') >= 0.05,
-			bass: s('Bass') >= 0.05
+			// Slightly lowered thresholds
+			vocals: sAny(ALIASES.vocals) >= 0.06,
+			brass: sAny(ALIASES.brass) >= 0.06,
+			trumpet: sAny(ALIASES.trumpet) >= 0.05,
+			trombone: sAny(ALIASES.trombone) >= 0.05,
+			saxophone: sAny(ALIASES.saxophone) >= 0.05,
+			drumkit: sAny(ALIASES.drumkit) >= 0.06,
+			guitar: sAny(ALIASES.guitar) >= 0.06,
+			piano: sAny(ALIASES.piano) >= 0.06,
+			organ: sAny(ALIASES.organ) >= 0.06,
+			bass: sAny(ALIASES.bass) >= 0.06
 		};
 		
 		return {
@@ -101,7 +120,7 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 			hints,
 			labels: top.map(x => x.label),
 			scores: top,
-			meta: { startSec: start, winSec }
+			meta: { startSec: start, winSec, bandpass }
 		};
 	} catch (e) {
 		console.log('[AST] Error:', e.message);
