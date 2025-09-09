@@ -3,6 +3,7 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs').promises;
 const http = require('http');
+const mm = require('music-metadata');
 const { runAudioProbes } = require('./probes/index.js');
 
 function run(bin, args, { collect = 'stdout' } = {}) {
@@ -770,6 +771,30 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
     estimateTempo(filePath)
   ]);
   
+  // Extract ID3 tags
+  let id3Tags = {};
+  try {
+    const metadata = await mm.parseFile(filePath);
+    id3Tags = {
+      title: metadata.common.title || baseName,
+      artist: metadata.common.artist || '',
+      album: metadata.common.album || '',
+      albumartist: metadata.common.albumartist || '',
+      year: metadata.common.year || null,
+      genre: metadata.common.genre || [],
+      track: metadata.common.track?.no || null,
+      comment: (metadata.common.comment && metadata.common.comment[0]) || '',
+      bpm: (metadata.native?.['ID3v2.4']?.find?.(t => t.id === 'TBPM')?.value) ||
+           (metadata.native?.['ID3v2.3']?.find?.(t => t.id === 'TBPM')?.value) || null,
+      key: (metadata.native?.['ID3v2.4']?.find?.(t => t.id === 'TKEY')?.value) ||
+           (metadata.native?.['ID3v2.3']?.find?.(t => t.id === 'TKEY')?.value) || '' ,
+      composer: (metadata.common.composer && metadata.common.composer[0]) || ''
+    };
+    console.log('[ID3] Tags extracted:', JSON.stringify(id3Tags, null, 2));
+  } catch (e) {
+    console.log('[ID3] Failed to extract tags:', e.message);
+  }
+  
   // Run audio probes - THIS WAS MISSING!
   let probes = { status: 'skipped', hints: {} };
   try {
@@ -857,6 +882,7 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
   const analysis = {
     file: path.basename(filePath),
     path: filePath,
+    id3: id3Tags,
     analyzed_at: new Date().toISOString(),
     has_wav_version: hasWav,
     ...probe,
@@ -883,12 +909,21 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
   
   const csvRows = [
     ['Title', baseName],
+    ['', ''],
+    ['--- ID3 Tags ---', ''],
+    ['Track Title', id3Tags.title || ''],
+    ['Artist', id3Tags.artist || ''],
+    ['Album', id3Tags.album || ''],
+    ['Year', id3Tags.year || ''],
+    ['Tagged Genre', (id3Tags.genre || []).join(', ')],
+    ['Tagged BPM', id3Tags.bpm || ''],
     ['File Path', filePath],
     ['Has WAV Version', hasWav ? 'Yes' : 'No'],
     ['Duration (seconds)', analysis.duration_sec || ''],
     ['Sample Rate (Hz)', analysis.sample_rate || ''],
     ['Channels', analysis.channels === 2 ? 'Stereo' : analysis.channels === 1 ? 'Mono' : analysis.channels || ''],
-    ['Estimated Tempo (BPM)', analysis.estimated_tempo_bpm || ''],
+    ['Estimated BPM', analysis.estimated_tempo_bpm || ''],
+    ['BPM Difference', (id3Tags.bpm && analysis.estimated_tempo_bpm) ? Math.abs(id3Tags.bpm - analysis.estimated_tempo_bpm).toFixed(1) : ''],
     ['Audio Detection', Object.entries(probes.hints || {}).filter(([k, v]) => v).map(([k]) => k).join(', ') || 'None'],
     ['', ''],
     ['--- Creative Analysis ---', ''],
