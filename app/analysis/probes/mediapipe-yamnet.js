@@ -78,19 +78,22 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 		const input = await ffmpegDecodeToTensor(filePath, start, winSec, 16000);
 		const results = await pipe(input.array, { sampling_rate: input.sampling_rate });
 		const top = results.slice(0, 25);
+		// Debug: show the top few labels and scores
+		console.log('[DEBUG] Top scores:', top.slice(0, 5).map(x => `${x.label}:${x.score.toFixed(3)}`));
 		
 		const s = (n) => scoreOf(top, n);
 		const hints = {
-			vocals: Math.max(s('Vocal music'), s('Singing'), s('Speech')) >= 0.15,
-			brass: Math.max(s('Brass instrument'), s('Trumpet'), s('Trombone'), s('Saxophone')) >= 0.10,
-			trumpet: s('Trumpet') >= 0.08,
-			trombone: s('Trombone') >= 0.06,
-			saxophone: s('Saxophone') >= 0.09,
-			drumkit: Math.max(s('Drum kit'), s('Drum'), s('Snare drum')) >= 0.14,
-			guitar: Math.max(s('Electric guitar'), s('Acoustic guitar')) >= 0.14,
-			piano: s('Piano') >= 0.12,
-			organ: Math.max(s('Organ'), s('Hammond organ')) >= 0.10,
-			bass: Math.max(s('Bass guitar'), s('Electric bass')) >= 0.10
+			// Lower thresholds temporarily to inspect model behavior
+			vocals: (s('Speech') >= 0.05) || (s('Vocal') >= 0.05) || (s('Singing') >= 0.05),
+			brass: (s('Brass') >= 0.05) || (s('Horn') >= 0.05),
+			trumpet: s('Trumpet') >= 0.05,
+			trombone: s('Trombone') >= 0.05,
+			saxophone: (s('Saxophone') >= 0.05) || (s('Sax') >= 0.05),
+			drumkit: (s('Drum') >= 0.05) || (s('Drum kit') >= 0.05) || (s('Snare') >= 0.05),
+			guitar: s('Guitar') >= 0.05,
+			piano: s('Piano') >= 0.05,
+			organ: s('Organ') >= 0.05,
+			bass: s('Bass') >= 0.05
 		};
 		
 		return {
