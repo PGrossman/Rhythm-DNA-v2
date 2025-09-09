@@ -14,7 +14,11 @@
 	console.log('[CLAP-WARM] Cache dir:', modelsDir);
 
 	try {
-		const clap = await pipeline('zero-shot-audio-classification', 'laion/clap-htsat-fused');
+		const clap = await pipeline(
+			'zero-shot-audio-classification',
+			'laion/clap-htsat-fused',
+			{ quantized: false, dtype: 'fp32' }
+		);
 		console.log('[CLAP-WARM] Model ready:', !!clap);
 		console.log('[CLAP-WARM] \u2713 Cached laion/clap-htsat-fused');
 	} catch (e) {

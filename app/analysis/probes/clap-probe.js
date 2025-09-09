@@ -41,7 +41,11 @@ async function ensureCLAP() {
 	env.allowRemoteModels = false;
 
 	try {
-		clapPipe = await pipeline('zero-shot-audio-classification', 'laion/clap-htsat-fused');
+		clapPipe = await pipeline(
+			'zero-shot-audio-classification',
+			'laion/clap-htsat-fused',
+			{ quantized: false, dtype: 'fp32' }
+		);
 		console.log('[CLAP] Loaded from local cache');
 		return clapPipe;
 	} catch (e) {
