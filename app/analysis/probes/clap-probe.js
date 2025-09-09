@@ -43,7 +43,7 @@ async function ensureCLAP() {
 	try {
 		clapPipe = await pipeline(
 			'zero-shot-audio-classification',
-			'laion/clap-htsat-fused',
+			'Xenova/clap-htsat-unfused',
 			{ quantized: false, dtype: 'fp32' }
 		);
 		console.log('[CLAP] Loaded from local cache');

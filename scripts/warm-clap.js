@@ -16,11 +16,11 @@
 	try {
 		const clap = await pipeline(
 			'zero-shot-audio-classification',
-			'laion/clap-htsat-fused',
+			'Xenova/clap-htsat-unfused',
 			{ quantized: false, dtype: 'fp32' }
 		);
 		console.log('[CLAP-WARM] Model ready:', !!clap);
-		console.log('[CLAP-WARM] \u2713 Cached laion/clap-htsat-fused');
+		console.log('[CLAP-WARM] \u2713 Cached Xenova/clap-htsat-unfused');
 	} catch (e) {
 		console.error('[CLAP-WARM] \u2717 Failed:', e.message);
 		process.exit(1);
