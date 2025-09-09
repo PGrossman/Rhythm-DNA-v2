@@ -107,11 +107,12 @@ async function probeCLAP(filePath, durationSec, opts = {}) {
 
 		const { array, sampling_rate } = await ffmpegToF32(filePath, start, winSec, 48000);
 
-		const out = await pipe(array, {
-			sampling_rate,
-			candidate_labels: LABELS,
-			hypothesis_template: 'This is a sound of {}.'
-		});
+		// Pass audio and labels as separate params
+		const out = await pipe(
+			array,
+			LABELS,
+			{ hypothesis_template: 'This is a sound of {}.' }
+		);
 
 		const scores = Object.fromEntries(out.map(x => [String(x.label).toLowerCase(), Number(x.score)]));
 		const topLabels = out.slice(0, 10).map(x => `${x.label}:${x.score.toFixed(3)}`);
