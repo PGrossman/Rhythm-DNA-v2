@@ -7,6 +7,7 @@
         "package": "npx electron-forge package",
         "get-ast": "bash scripts/get-ast.sh",
         "warm-models": "node scripts/warm-xenova-models.js",
+        "warm-clap": "node scripts/warm-clap.js",
         "get-yamnet": "bash scripts/get-yamnet.sh",
         "install-models": "node scripts/install-models.js",
         "setup-yamnet": "node scripts/setup-yamnet.js"

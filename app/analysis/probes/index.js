@@ -1,6 +1,7 @@
 'use strict';
 
 const { probeYamnet } = require('./mediapipe-yamnet.js');
+const { probeCLAP } = require('./clap-probe.js');
 // const { probeZeroShot } = require('./transformers-zero-shot.js'); // Disabled until zero-shot-audio model available
 
 const ZS_LABELS = [
@@ -33,6 +34,18 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 	// Wider intro window to catch early horns (around ~12-27s)
 	const introLen = Math.min(30, Math.max(12, Math.floor(durationSec * 0.12)));
 
+	// Try CLAP first for targeted detection
+	let clapIntro = { status: 'skipped' };
+	try {
+		clapIntro = await withTimeout(
+			probeCLAP(filePath, durationSec, { winSec: 15, centerFrac: 0.08 }),
+			15000,
+			'clap-intro'
+		);
+	} catch (e) {
+		console.log('[CLAP] Intro error:', e.message);
+	}
+
 	let intro = { status: 'skipped' };
 	try {
 		intro = await withTimeout(
@@ -45,6 +58,15 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 		intro = { status: 'skipped', error: String(e.message || e) };
 	}
 
+	let clapMiddle = { status: 'skipped' };
+	try {
+		clapMiddle = await withTimeout(
+			probeCLAP(filePath, durationSec, { winSec: 8, centerFrac: 0.50 }),
+			15000,
+			'clap-middle'
+		);
+	} catch (e) {}
+
 	let middle = { status: 'skipped' };
 	try {
 		middle = await withTimeout(
@@ -56,6 +78,15 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 	} catch (e) {
 		middle = { status: 'skipped', error: String(e.message || e) };
 	}
+
+	let clapOutro = { status: 'skipped' };
+	try {
+		clapOutro = await withTimeout(
+			probeCLAP(filePath, durationSec, { winSec: 8, centerFrac: 0.92 }),
+			15000,
+			'clap-outro'
+		);
+	} catch (e) {}
 
 	let outro = { status: 'skipped' };
 	try {
@@ -71,7 +102,10 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 
     // Zero-shot disabled - to re-enable use a zero-shot audio model, e.g. 'Xenova/clap-htsat-unfused'
 
-	const hints = orHints(intro.hints, middle.hints, outro.hints);
+	const hints = orHints(
+		orHints(clapIntro.hints, clapMiddle.hints),
+		orHints(clapOutro.hints, orHints(intro.hints, orHints(middle.hints, outro.hints)))
+	);
     // No zero-shot post-processing
 
 	const status = (intro.status === 'ok' || middle.status === 'ok' || outro.status === 'ok') ? 'ok' : 'skipped';
