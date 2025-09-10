@@ -892,6 +892,7 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
   
   const analysis = {
     file: path.basename(filePath),
+    title: id3Tags.title || path.basename(filePath, path.extname(filePath)),
     path: filePath,
     id3: id3Tags,
     analyzed_at: new Date().toISOString(),
