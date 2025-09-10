@@ -34,7 +34,6 @@ const views = {
             <aside id="search-filters" style="width: 34%; max-width: 440px; border-right: 1px solid #ddd; padding-right: 12px; overflow-y: auto;"></aside>
             <main id="search-results" style="flex: 1; min-width: 0; overflow-y: auto;"></main>
         </div>
-        <script src="./ui/search-panel.js"></script>
     `,
     settings: `
         <h2>Settings</h2>
@@ -174,10 +173,235 @@ const setView = (name) => {
     // Setup view-specific handlers
     if (name === 'analysis') {
         setupAnalysisView();
+    } else if (name === 'search') {
+        setupSearchView();
     } else if (name === 'settings') {
         setupSettingsView();
     }
 };
+
+function setupSearchView() {
+    const filters = document.getElementById('search-filters');
+    const results = document.getElementById('search-results');
+    
+    if (!filters || !results) {
+        console.error('Search elements not found');
+        return;
+    }
+    
+    let searchDB = { tracks: [], criteria: {} };
+    let selectedFilters = {};
+    
+    // Load database
+    loadSearchDB();
+    
+    async function loadSearchDB() {
+        try {
+            const data = await window.api.loadSearchDb();
+            if (data.ok) {
+                searchDB.tracks = data.rhythm || [];
+                searchDB.criteria = data.criteria || {};
+                buildFilters();
+                showRandomTracks();
+            }
+        } catch (e) {
+            console.error('Failed to load DB:', e);
+            results.innerHTML = '<p style="padding: 20px;">Failed to load database</p>';
+        }
+    }
+    
+    function buildFilters() {
+        const values = {
+            instrument: new Set(),
+            genre: new Set(),
+            mood: new Set(),
+            theme: new Set(),
+            vocals: new Set()
+        };
+        
+        searchDB.tracks.forEach(track => {
+            // Instruments - check multiple possible locations
+            const instruments = track.creative?.instrument || track.instrument || [];
+            instruments.forEach(i => values.instrument.add(i));
+            
+            // Also check audio_probes for detected instruments
+            if (track.audio_probes) {
+                Object.entries(track.audio_probes).forEach(([key, val]) => {
+                    if (val === true) {
+                        const mapped = key.charAt(0).toUpperCase() + key.slice(1);
+                        values.instrument.add(mapped);
+                    }
+                });
+            }
+            
+            // Other creative fields
+            const creative = track.creative || {};
+            (creative.genre || []).forEach(g => values.genre.add(g));
+            (creative.mood || []).forEach(m => values.mood.add(m));
+            (creative.theme || []).forEach(t => values.theme.add(t));
+            (creative.vocals || []).forEach(v => values.vocals.add(v));
+        });
+        
+        filters.innerHTML = `
+            <div style="margin-bottom: 20px;">
+                <button id="search-clear" style="margin-right: 10px;">Clear</button>
+                <button id="search-run">Search</button>
+            </div>
+        `;
+        
+        const FACETS = [
+            { key: 'instrument', label: 'Instrument' },
+            { key: 'genre', label: 'Genre' },
+            { key: 'mood', label: 'Mood' },
+            { key: 'vocals', label: 'Vocals' },
+            { key: 'theme', label: 'Theme' }
+        ];
+        
+        FACETS.forEach(({ key, label }) => {
+            const valuesList = Array.from(values[key]).sort();
+            if (!valuesList.length) return;
+            
+            const section = document.createElement('details');
+            section.style.marginBottom = '15px';
+            section.open = true;
+            
+            section.innerHTML = `
+                <summary style="cursor: pointer; font-weight: bold; padding: 5px 0;">
+                    ${label} (${valuesList.length})
+                </summary>
+                <div id="facet-${key}" style="padding-left: 10px; max-height: 300px; overflow-y: auto;"></div>
+            `;
+            
+            const body = section.querySelector(`#facet-${key}`);
+            
+            valuesList.forEach(val => {
+                const opt = document.createElement('label');
+                opt.style.display = 'block';
+                opt.style.margin = '5px 0';
+                opt.innerHTML = `
+                    <input type="checkbox" value="${val}" data-facet="${key}">
+                    <span>${val}</span>
+                `;
+                body.appendChild(opt);
+            });
+            
+            filters.appendChild(section);
+        });
+        
+        // Wire up buttons
+        document.getElementById('search-run')?.addEventListener('click', runSearch);
+        document.getElementById('search-clear')?.addEventListener('click', clearFilters);
+    }
+    
+    function getTitle(track) {
+        return track.title || 
+               track.id3?.title || 
+               track.file?.replace(/\.(mp3|wav)$/i, '') ||
+               track.path?.split('/').pop()?.replace(/\.(mp3|wav)$/i, '') ||
+               'Unknown Track';
+    }
+    
+    function showRandomTracks() {
+        const random = [...searchDB.tracks].sort(() => Math.random() - 0.5).slice(0, 5);
+        renderResults(random);
+    }
+    
+    async function renderResults(tracks) {
+        results.innerHTML = '';
+        
+        if (!tracks.length) {
+            results.innerHTML = '<p style="padding: 20px;">No matching tracks found.</p>';
+            return;
+        }
+        
+        for (const track of tracks) {
+            const card = document.createElement('div');
+            card.style.cssText = 'border: 1px solid #e5e5e5; border-radius: 8px; padding: 15px; margin-bottom: 15px;';
+            
+            const title = getTitle(track);
+            const artist = track.id3?.artist || track.artist || '';
+            const path = track.path || track.file || '';
+            
+            // Check for waveform
+            let waveformHtml = '<div style="height: 100px; background: #f5f5f5; display: flex; align-items: center; justify-content: center; color: #999;">Waveform not available</div>';
+            
+            if (track.waveform_png) {
+                try {
+                    const response = await fetch(`file://${track.waveform_png}`);
+                    if (response.ok) {
+                        waveformHtml = `<img src="file://${track.waveform_png}" style="width: 100%; height: 100px; object-fit: cover;">`;
+                    }
+                } catch (e) {
+                    // File doesn't exist, use placeholder
+                }
+            }
+            
+            card.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 10px;">
+                    <div>
+                        <h4 style="margin: 0 0 5px 0;">${title}</h4>
+                        ${artist ? `<p style="color: #666; margin: 0;">${artist}</p>` : ''}
+                    </div>
+                    <button onclick="window.api.revealInFinder('${path.replace(/'/g, "\\'")}')">Show in Finder</button>
+                </div>
+                ${waveformHtml}
+            `;
+            
+            results.appendChild(card);
+        }
+    }
+    
+    function trackMatches(track, filters) {
+        for (const [facet, values] of Object.entries(filters)) {
+            if (!values.length) continue;
+            
+            let trackValues = [];
+            
+            if (facet === 'instrument') {
+                trackValues = track.creative?.instrument || track.instrument || [];
+                
+                if (track.audio_probes) {
+                    Object.entries(track.audio_probes).forEach(([key, val]) => {
+                        if (val === true) {
+                            trackValues.push(key.charAt(0).toUpperCase() + key.slice(1));
+                        }
+                    });
+                }
+            } else {
+                trackValues = track.creative?.[facet] || track[facet] || [];
+            }
+            
+            const hasMatch = values.some(v => 
+                trackValues.some(tv => 
+                    tv === v || tv.toLowerCase() === v.toLowerCase()
+                )
+            );
+            
+            if (!hasMatch) return false;
+        }
+        return true;
+    }
+    
+    function runSearch() {
+        selectedFilters = {};
+        
+        document.querySelectorAll('#search-filters input[type="checkbox"]:checked').forEach(cb => {
+            const facet = cb.dataset.facet;
+            if (!selectedFilters[facet]) selectedFilters[facet] = [];
+            selectedFilters[facet].push(cb.value);
+        });
+        
+        const filtered = searchDB.tracks.filter(track => trackMatches(track, selectedFilters));
+        renderResults(filtered);
+    }
+    
+    function clearFilters() {
+        document.querySelectorAll('#search-filters input[type="checkbox"]').forEach(cb => {
+            cb.checked = false;
+        });
+        showRandomTracks();
+    }
+}
 
 function setupAnalysisView() {
     const dropZone = document.getElementById('drop-zone');

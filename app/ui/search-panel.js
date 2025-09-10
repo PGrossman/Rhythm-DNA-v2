@@ -1,9 +1,12 @@
 // Search panel logic - corrected data paths
-(async function() {
+document.addEventListener('DOMContentLoaded', async function() {
   const filters = document.getElementById('search-filters');
   const results = document.getElementById('search-results');
   
-  if (!filters || !results) return;
+  if (!filters || !results) {
+    console.error('Search panel elements not found');
+    return;
+  }
   
   let DB = { tracks: [], criteria: {} };
   let selectedFilters = {};
@@ -230,4 +233,4 @@
   
   // Initial load
   showRandomTracks();
-})();
+});
