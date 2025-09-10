@@ -30,10 +30,87 @@ const views = {
         <div id="queue-display"></div>
     `,
     search: `
-        <div id="search-container" style="height: calc(100vh - 120px); display: flex; gap: 16px;">
-            <aside id="search-filters" style="width: 34%; max-width: 440px; border-right: 1px solid #ddd; padding-right: 12px; overflow-y: auto;"></aside>
-            <main id="search-results" style="flex: 1; min-width: 0; overflow-y: auto;"></main>
+        <div style="display: grid; grid-template-columns: 300px 1fr; gap: 20px; height: calc(100vh - 200px);">
+            <div id="search-sidebar" style="border-right: 1px solid #e5e5e5; padding-right: 20px; overflow-y: auto;">
+                <div style="margin-bottom: 20px;">
+                    <button onclick="window.clearSearch()" style="margin-right: 10px;">Clear</button>
+                    <button onclick="window.runSearch()">Search</button>
+                </div>
+                <div id="search-filters"></div>
+            </div>
+            <div id="search-results" style="overflow-y: auto;"></div>
         </div>
+        <script>
+        (async function() {
+            let DB = { tracks: [], criteria: {} };
+            
+            async function loadAndShow() {
+                try {
+                    const data = await window.api.searchGetDB();
+                    if (data?.success) {
+                        DB.tracks = data.rhythm || [];
+                        DB.criteria = data.criteria || {};
+                        
+                        // Build filters
+                        const filters = document.getElementById('search-filters');
+                        ['instrument', 'genre', 'mood', 'vocals', 'theme'].forEach(key => {
+                            const values = DB.criteria[key] || [];
+                            if (!values.length) return;
+                            
+                            const section = document.createElement('details');
+                            section.innerHTML = '<summary>' + key + '</summary><div id="filter-' + key + '"></div>';
+                            values.forEach(val => {
+                                const label = document.createElement('label');
+                                label.style.display = 'block';
+                                label.innerHTML = '<input type="checkbox" data-key="' + key + '" value="' + val + '"> ' + val;
+                                section.querySelector('#filter-' + key).appendChild(label);
+                            });
+                            filters.appendChild(section);
+                        });
+                        
+                        // Show 5 random tracks
+                        const random = [...DB.tracks].sort(() => Math.random() - 0.5).slice(0, 5);
+                        showResults(random);
+                    }
+                } catch (e) {
+                    document.getElementById('search-results').innerHTML = '<p>Failed to load database</p>';
+                }
+            }
+            
+            function showResults(tracks) {
+                const results = document.getElementById('search-results');
+                results.innerHTML = tracks.map(t => 
+                    '<div style="border: 1px solid #ddd; padding: 10px; margin: 10px;">' +
+                    '<h4>' + (t.title || t.file || 'Unknown') + '</h4>' +
+                    '</div>'
+                ).join('');
+            }
+            
+            window.clearSearch = () => {
+                document.querySelectorAll('#search-filters input').forEach(cb => cb.checked = false);
+            };
+            
+            window.runSearch = () => {
+                const selected = {};
+                document.querySelectorAll('#search-filters input:checked').forEach(cb => {
+                    const key = cb.dataset.key;
+                    if (!selected[key]) selected[key] = [];
+                    selected[key].push(cb.value);
+                });
+                
+                const filtered = DB.tracks.filter(t => {
+                    for (const [key, vals] of Object.entries(selected)) {
+                        const trackVals = t.creative?.[key] || [];
+                        if (!vals.some(v => trackVals.includes(v))) return false;
+                    }
+                    return true;
+                });
+                showResults(filtered);
+            };
+            
+            if (document.getElementById('search-sidebar')) loadAndShow();
+        })();
+        </script>
     `,
     settings: `
         <h2>Settings</h2>
