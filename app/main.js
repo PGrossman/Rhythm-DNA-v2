@@ -251,17 +251,17 @@ const createWindow = () => {
     ipcMain.handle('search:getDB', async () => {
         try {
             const dbFolder = settings.dbFolder || path.join(app.getPath('userData'), 'RhythmDNA');
-            const criteriaPath = path.join(dbFolder, 'criteria.db.json');
-            const songsPath = path.join(dbFolder, 'songs.db.json');
+            const criteriaPath = path.join(dbFolder, 'CriteriaDB.json');
+            const rhythmPath = path.join(dbFolder, 'RhythmDB.json');
             
-            if (!fs.existsSync(criteriaPath) || !fs.existsSync(songsPath)) {
+            if (!fs.existsSync(criteriaPath) || !fs.existsSync(rhythmPath)) {
                 return { success: false, error: 'Database files not found' };
             }
             
             const criteria = JSON.parse(await fsPromises.readFile(criteriaPath, 'utf8'));
-            const songs = JSON.parse(await fsPromises.readFile(songsPath, 'utf8'));
+            const rhythm = JSON.parse(await fsPromises.readFile(rhythmPath, 'utf8'));
             
-            return { success: true, criteria, songs };
+            return { success: true, criteria, rhythm };
         } catch (e) {
             console.error('[MAIN] search:getDB error:', e);
             return { success: false, error: e.message };

@@ -466,7 +466,7 @@ async function setupSearchView() {
     renderSearchFilters(dbResult.criteria);
 
     // Show 5 random tracks initially
-    const tracks = Object.values(dbResult.songs.tracks || {});
+    const tracks = Object.values(dbResult.rhythm?.tracks || dbResult.tracks || {});
     showRandomTracks(tracks, 5);
 
     // Wire buttons
@@ -560,7 +560,7 @@ function runSearch() {
     if (!searchDB) return;
 
     const filters = getSelectedFilters();
-    const tracks = Object.values(searchDB.songs.tracks || {});
+    const tracks = Object.values(searchDB.rhythm?.tracks || searchDB.tracks || {});
     const matches = tracks.filter(t => matchTrack(t, filters));
 
     renderSearchResults(matches.slice(0, 30));
@@ -572,7 +572,7 @@ function clearFilters() {
     });
 
     if (searchDB) {
-        const tracks = Object.values(searchDB.songs.tracks || {});
+        const tracks = Object.values(searchDB.rhythm?.tracks || searchDB.tracks || {});
         showRandomTracks(tracks, 5);
     }
 }
