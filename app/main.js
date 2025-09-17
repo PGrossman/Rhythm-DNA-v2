@@ -107,6 +107,7 @@ const createWindow = () => {
     const win = new BrowserWindow({
         width: 1200,
         height: 980,  // Tall enough for 10 cards comfortably
+        icon: path.join(app.getAppPath(), 'app', 'assets', 'icon.png'),
         webPreferences: {
             preload: path.join(app.getAppPath(), 'app', 'preload.js'),
             contextIsolation: true,
@@ -363,6 +364,14 @@ const createWindow = () => {
 
 app.whenReady().then(() => {
     loadSettings().then(() => {
+        // Set dock icon for macOS
+        if (process.platform === 'darwin') {
+            const iconPath = path.join(app.getAppPath(), 'app', 'assets', 'icon.png');
+            if (fs.existsSync(iconPath)) {
+                app.dock.setIcon(iconPath);
+            }
+        }
+        
         createWindow();
         resolveDbPaths();
     });
@@ -375,9 +384,8 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
-        app.quit();
-    }
+    // Always quit when window is closed (including on macOS)
+    app.quit();
 });
 
 
