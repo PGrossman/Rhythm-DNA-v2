@@ -962,68 +962,9 @@ function setupAnalysisView() {
 }
 
 async function processQueue() {
-    // Get concurrency setting (default to 4 if not set)
-    const settings = await window.api.getSettings();
-    const concurrency = settings.techConcurrency || 4;
-    console.log(`[Renderer] Processing queue with concurrency: ${concurrency}`);
-    
-    // Filter to MP3 files only
-    const mp3Tracks = currentQueue.filter(track => 
-        track.path && track.path.toLowerCase().endsWith('.mp3')
-    );
-    
-    // Filter based on re-analyze checkbox
-    const tracksToProcess = mp3Tracks.filter(track => {
-        if (track.hasExistingAnalysis && !allowReanalyze) {
-            console.log(`[Renderer] Skipping ${track.fileName} - has existing analysis`);
-            return false;
-        }
-        return true;
-    });
-    
-    console.log(`[Renderer] Processing ${tracksToProcess.length} of ${mp3Tracks.length} tracks`);
-    
-    // Worker pool: start work immediately when a worker becomes available
-    let queueIndex = 0;
-    
-    const worker = async (workerId) => {
-        while (queueIndex < tracksToProcess.length) {
-            const trackIndex = queueIndex++;
-            if (trackIndex >= tracksToProcess.length) break;
-            const track = tracksToProcess[trackIndex];
-            console.log(`[Worker ${workerId}] Starting: ${track.fileName}`);
-            try {
-                track.status = 'PROCESSING';
-                track.techStatus = 'PROCESSING';
-                updateQueueDisplay();
-                
-                const result = await window.api.analyzeFile(track.path);
-                
-                if (result.success) {
-                    track.status = 'COMPLETE';
-                    track.techStatus = 'COMPLETE';
-                    track.creativeStatus = 'COMPLETE';
-                    console.log(`[Worker ${workerId}] Complete: ${track.fileName}`);
-                } else {
-                    track.status = 'ERROR';
-                    console.error(`[Worker ${workerId}] Failed: ${track.fileName}`);
-                }
-                updateQueueDisplay();
-            } catch (error) {
-                console.error(`[Worker ${workerId}] Error:`, error);
-                track.status = 'ERROR';
-                updateQueueDisplay();
-            }
-        }
-        console.log(`[Worker ${workerId}] No more files, shutting down`);
-    };
-    
-    const workers = [];
-    for (let i = 0; i < Math.min(concurrency, tracksToProcess.length); i++) {
-        workers.push(worker(i + 1));
-    }
-    await Promise.all(workers);
-    console.log('[Renderer] All files processed');
+    console.log('[Renderer] Start Analysis clicked - main process handles everything');
+    // The main process already has the queue from drop events
+    // It will process automatically
 }
 
 function updateQueueDisplay() {
@@ -1108,26 +1049,6 @@ if (window.api && window.api.onJobProgress) {
     });
 }
 
-async function processTrack(track) {
-    try {
-        track.status = 'PROCESSING';
-        updateQueueDisplay();
-        const result = await window.api.analyzeFile(track.path);
-        if (result.success) {
-            track.status = 'COMPLETE';
-            track.techStatus = 'COMPLETE';
-            console.log(`[Renderer] Analysis complete: ${track.fileName || track.filename || track.path}`);
-        } else {
-            track.status = 'ERROR';
-            console.error(`[Renderer] Analysis failed: ${result.error}`);
-        }
-        updateQueueDisplay();
-    } catch (error) {
-        console.error('[Renderer] Process error:', error);
-        track.status = 'ERROR';
-        updateQueueDisplay();
-    }
-}
 
 // Listen for queue updates
 window.api?.onQueueUpdate?.((event, data) => {

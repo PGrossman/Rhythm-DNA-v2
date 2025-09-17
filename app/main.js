@@ -213,16 +213,6 @@ const createWindow = () => {
         return { ffprobe: true, ffmpeg: true, ollama: false };
     });
     
-    // Other stub handlers
-    ipcMain.handle('startAnalysis', async (event, options) => {
-        console.log('[MAIN] startAnalysis:', options);
-        return { started: true };
-    });
-    
-    ipcMain.handle('clearQueue', async () => {
-        console.log('[MAIN] clearQueue');
-        return { cleared: true };
-    });
     
     // FFmpeg analysis handler
     ipcMain.handle('analyzeFile', async (event, filePath) => {
