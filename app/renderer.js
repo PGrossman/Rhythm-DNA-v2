@@ -30,87 +30,26 @@ const views = {
         <div id="queue-display"></div>
     `,
     search: `
-        <div style="display: grid; grid-template-columns: 300px 1fr; gap: 20px; height: calc(100vh - 200px);">
-            <div id="search-sidebar" style="border-right: 1px solid #e5e5e5; padding-right: 20px; overflow-y: auto;">
-                <div style="margin-bottom: 20px;">
-                    <button onclick="window.clearSearch()" style="margin-right: 10px;">Clear</button>
-                    <button onclick="window.runSearch()">Search</button>
+        <div style="display: grid; grid-template-columns: 250px 1fr; gap: 20px; height: calc(100vh - 100px); padding: 20px;">
+            <!-- Left column: Filters -->
+            <div style="border-right: 1px solid #e5e5e5; padding-right: 20px; overflow-y: auto;">
+                <h3 style="margin: 0 0 15px 0;">Filters</h3>
+                <button id="clear-filters" style="width: 100%; padding: 8px; margin-bottom: 15px; background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer;">
+                    Clear All
+                </button>
+                <div id="search-filters">
+                    <!-- Filters will be populated here -->
                 </div>
-                <div id="search-filters"></div>
             </div>
-            <div id="search-results" style="overflow-y: auto;"></div>
+            
+            <!-- Right column: Results -->
+            <div style="overflow-y: auto;">
+                <h2 style="margin: 0 0 20px 0;">Search Library</h2>
+                <div id="results-container">
+                    <p style="color: #666;">Loading...</p>
+                </div>
+            </div>
         </div>
-        <script>
-        (async function() {
-            let DB = { tracks: [], criteria: {} };
-            
-            async function loadAndShow() {
-                try {
-                    const data = await window.api.searchGetDB();
-                    if (data?.success) {
-                        DB.tracks = data.rhythm || [];
-                        DB.criteria = data.criteria || {};
-                        
-                        // Build filters
-                        const filters = document.getElementById('search-filters');
-                        ['instrument', 'genre', 'mood', 'vocals', 'theme'].forEach(key => {
-                            const values = DB.criteria[key] || [];
-                            if (!values.length) return;
-                            
-                            const section = document.createElement('details');
-                            section.innerHTML = '<summary>' + key + '</summary><div id="filter-' + key + '"></div>';
-                            values.forEach(val => {
-                                const label = document.createElement('label');
-                                label.style.display = 'block';
-                                label.innerHTML = '<input type="checkbox" data-key="' + key + '" value="' + val + '"> ' + val;
-                                section.querySelector('#filter-' + key).appendChild(label);
-                            });
-                            filters.appendChild(section);
-                        });
-                        
-                        // Show 5 random tracks
-                        const random = [...DB.tracks].sort(() => Math.random() - 0.5).slice(0, 5);
-                        showResults(random);
-                    }
-                } catch (e) {
-                    document.getElementById('search-results').innerHTML = '<p>Failed to load database</p>';
-                }
-            }
-            
-            function showResults(tracks) {
-                const results = document.getElementById('search-results');
-                results.innerHTML = tracks.map(t => 
-                    '<div style="border: 1px solid #ddd; padding: 10px; margin: 10px;">' +
-                    '<h4>' + (t.title || t.file || 'Unknown') + '</h4>' +
-                    '</div>'
-                ).join('');
-            }
-            
-            window.clearSearch = () => {
-                document.querySelectorAll('#search-filters input').forEach(cb => cb.checked = false);
-            };
-            
-            window.runSearch = () => {
-                const selected = {};
-                document.querySelectorAll('#search-filters input:checked').forEach(cb => {
-                    const key = cb.dataset.key;
-                    if (!selected[key]) selected[key] = [];
-                    selected[key].push(cb.value);
-                });
-                
-                const filtered = DB.tracks.filter(t => {
-                    for (const [key, vals] of Object.entries(selected)) {
-                        const trackVals = t.creative?.[key] || [];
-                        if (!vals.some(v => trackVals.includes(v))) return false;
-                    }
-                    return true;
-                });
-                showResults(filtered);
-            };
-            
-            if (document.getElementById('search-sidebar')) loadAndShow();
-        })();
-        </script>
     `,
     settings: `
         <h2>Settings</h2>
@@ -257,226 +196,427 @@ const setView = (name) => {
     }
 };
 
-function setupSearchView() {
-    const filters = document.getElementById('search-filters');
-    const results = document.getElementById('search-results');
+// Global audio element and playback state
+let currentAudio = null;
+let currentPlayingPath = null;
+let playheadAnimationId = null;
+
+// Helper for file URLs - fallback if not in preload
+function makeFileUrl(path) {
+    if (window.api.toFileUrl) {
+        return window.api.toFileUrl(path);
+    }
+    // Fallback encoding
+    return 'file://' + encodeURI(path.replace(/\\/g, '/'));
+}
+
+async function setupSearchView() {
+    console.log('[SEARCH] Initializing search view');
     
-    if (!filters || !results) {
-        console.error('Search elements not found');
+    // Create shared audio element if not exists
+    if (!currentAudio) {
+        currentAudio = new Audio();
+        currentAudio.addEventListener('ended', () => {
+            stopPlayback();
+        });
+        currentAudio.addEventListener('error', (e) => {
+            console.error('[SEARCH] Audio error:', e);
+            stopPlayback();
+        });
+    }
+    
+    const resultsContainer = document.getElementById('results-container');
+    const filtersContainer = document.getElementById('search-filters');
+    
+    if (!resultsContainer || !filtersContainer) {
+        console.error('[SEARCH] Missing containers');
         return;
     }
     
-    let searchDB = { tracks: [], criteria: {} };
-    let selectedFilters = {};
-    
-    // Load database
-    loadSearchDB();
-    
-    async function loadSearchDB() {
-        try {
-            const data = await window.api.loadSearchDb();
-            if (data.ok) {
-                searchDB.tracks = data.rhythm || [];
-                searchDB.criteria = data.criteria || {};
-                buildFilters();
-                showRandomTracks();
-            }
-        } catch (e) {
-            console.error('Failed to load DB:', e);
-            results.innerHTML = '<p style="padding: 20px;">Failed to load database</p>';
+    try {
+        // Load database
+        const dbData = await window.api.searchGetDB();
+        
+        // Check for error response
+        if (dbData && dbData.success === false) {
+            throw new Error(dbData.error || 'Database load failed');
         }
-    }
-    
-    function buildFilters() {
-        const values = {
-            instrument: new Set(),
-            genre: new Set(),
-            mood: new Set(),
-            theme: new Set(),
-            vocals: new Set()
-        };
         
-        searchDB.tracks.forEach(track => {
-            // Instruments - check multiple possible locations
-            const instruments = track.creative?.instrument || track.instrument || [];
-            instruments.forEach(i => values.instrument.add(i));
-            
-            // Also check audio_probes for detected instruments
-            if (track.audio_probes) {
-                Object.entries(track.audio_probes).forEach(([key, val]) => {
-                    if (val === true) {
-                        const mapped = key.charAt(0).toUpperCase() + key.slice(1);
-                        values.instrument.add(mapped);
-                    }
-                });
-            }
-            
-            // Other creative fields
-            const creative = track.creative || {};
-            (creative.genre || []).forEach(g => values.genre.add(g));
-            (creative.mood || []).forEach(m => values.mood.add(m));
-            (creative.theme || []).forEach(t => values.theme.add(t));
-            (creative.vocals || []).forEach(v => values.vocals.add(v));
-        });
+        // Normalize tracks from various formats to array
+        let allTracks = [];
+        if (Array.isArray(dbData.rhythm)) {
+            allTracks = dbData.rhythm;
+        } else if (dbData.rhythm?.tracks) {
+            allTracks = Object.values(dbData.rhythm.tracks);
+        } else if (dbData.rhythm && typeof dbData.rhythm === 'object') {
+            // Handle direct object format {"id": {track}, "id2": {track}}
+            allTracks = Object.values(dbData.rhythm);
+        }
         
-        filters.innerHTML = `
-            <div style="margin-bottom: 20px;">
-                <button id="search-clear" style="margin-right: 10px;">Clear</button>
-                <button id="search-run">Search</button>
-            </div>
-        `;
+        console.log('[SEARCH] Loaded', allTracks.length, 'tracks');
         
-        const FACETS = [
-            { key: 'instrument', label: 'Instrument' },
-            { key: 'genre', label: 'Genre' },
-            { key: 'mood', label: 'Mood' },
-            { key: 'vocals', label: 'Vocals' },
-            { key: 'theme', label: 'Theme' }
-        ];
-        
-        FACETS.forEach(({ key, label }) => {
-            const valuesList = Array.from(values[key]).sort();
-            if (!valuesList.length) return;
-            
-            const section = document.createElement('details');
-            section.style.marginBottom = '15px';
-            section.open = true;
-            
-            section.innerHTML = `
-                <summary style="cursor: pointer; font-weight: bold; padding: 5px 0;">
-                    ${label} (${valuesList.length})
-                </summary>
-                <div id="facet-${key}" style="padding-left: 10px; max-height: 300px; overflow-y: auto;"></div>
-            `;
-            
-            const body = section.querySelector(`#facet-${key}`);
-            
-            valuesList.forEach(val => {
-                const opt = document.createElement('label');
-                opt.style.display = 'block';
-                opt.style.margin = '5px 0';
-                opt.innerHTML = `
-                    <input type="checkbox" value="${val}" data-facet="${key}">
-                    <span>${val}</span>
-                `;
-                body.appendChild(opt);
-            });
-            
-            filters.appendChild(section);
-        });
-        
-        // Wire up buttons
-        document.getElementById('search-run')?.addEventListener('click', runSearch);
-        document.getElementById('search-clear')?.addEventListener('click', clearFilters);
-    }
-    
-    function getTitle(track) {
-        return track.title || 
-               track.id3?.title || 
-               track.file?.replace(/\.(mp3|wav)$/i, '') ||
-               track.path?.split('/').pop()?.replace(/\.(mp3|wav)$/i, '') ||
-               'Unknown Track';
-    }
-    
-    function showRandomTracks() {
-        const random = [...searchDB.tracks].sort(() => Math.random() - 0.5).slice(0, 5);
-        renderResults(random);
-    }
-    
-    async function renderResults(tracks) {
-        results.innerHTML = '';
-        
-        if (!tracks.length) {
-            results.innerHTML = '<p style="padding: 20px;">No matching tracks found.</p>';
+        if (!allTracks.length) {
+            resultsContainer.innerHTML = '<p style="padding: 20px; color: #666;">No analyzed tracks found. Analyze some audio files first.</p>';
             return;
         }
         
-        for (const track of tracks) {
-            const card = document.createElement('div');
-            card.style.cssText = 'border: 1px solid #e5e5e5; border-radius: 8px; padding: 15px; margin-bottom: 15px;';
-            
-            const title = getTitle(track);
-            const artist = track.id3?.artist || track.artist || '';
-            const path = track.path || track.file || '';
-            
-            // Check for waveform
-            let waveformHtml = '<div style="height: 100px; background: #f5f5f5; display: flex; align-items: center; justify-content: center; color: #999;">Waveform not available</div>';
-            
-            if (track.waveform_png) {
-                try {
-                    const response = await fetch(`file://${track.waveform_png}`);
-                    if (response.ok) {
-                        waveformHtml = `<img src="file://${track.waveform_png}" style="width: 100%; height: 100px; object-fit: cover;">`;
-                    }
-                } catch (e) {
-                    // File doesn't exist, use placeholder
+        // Store tracks globally for filtering
+        window.__searchTracks = allTracks;
+        window.__activeFilters = {};
+        
+        // Render filters (remove old listeners first)
+        const oldFilters = document.getElementById('search-filters');
+        const newFilters = oldFilters.cloneNode(false);
+        oldFilters.parentNode.replaceChild(newFilters, oldFilters);
+        
+        renderFilters(dbData.criteria || {});
+        
+        // Generate missing waveforms for first batch
+        const firstBatch = allTracks.slice(0, 20);
+        await ensureWaveforms(firstBatch);
+        
+        // Render initial results
+        renderResults(firstBatch);
+        
+        // Wire up filter handlers
+        setupFilterHandlers();
+        
+    } catch (error) {
+        console.error('[SEARCH] Error:', error);
+        resultsContainer.innerHTML = '<p style="padding: 20px; color: red;">Error loading search data: ' + error.message + '</p>';
+    }
+}
+
+async function ensureWaveforms(tracks) {
+    // Generate waveforms for tracks that don't have them
+    const promises = tracks.map(async (track) => {
+        if (!track.waveform_png && track.path) {
+            try {
+                const result = await window.api.getWaveformPng(track.path);
+                if (result?.ok && result.png) {
+                    track.waveform_png = result.png;
                 }
+            } catch (e) {
+                console.log('[SEARCH] Could not generate waveform for:', track.path);
             }
-            
-            card.innerHTML = `
-                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 10px;">
-                    <div>
-                        <h4 style="margin: 0 0 5px 0;">${title}</h4>
-                        ${artist ? `<p style="color: #666; margin: 0;">${artist}</p>` : ''}
-                    </div>
-                    <button onclick="window.api.revealInFinder('${path.replace(/'/g, "\\'")}')">Show in Finder</button>
-                </div>
-                ${waveformHtml}
-            `;
-            
-            results.appendChild(card);
         }
+    });
+    
+    await Promise.all(promises);
+}
+
+function renderFilters(criteria) {
+    const container = document.getElementById('search-filters');
+    if (!container) return;
+    
+    container.innerHTML = '';
+    
+    // Define all filter sections from CriteriaDB
+    const sections = [
+        { key: 'genre', label: 'Genre', values: criteria.genre || {} },
+        { key: 'mood', label: 'Mood', values: criteria.mood || {} },
+        { key: 'instrument', label: 'Instruments', values: criteria.instrument || {} },
+        { key: 'theme', label: 'Themes', values: criteria.theme || {} },
+        { key: 'vocals', label: 'Vocals', values: criteria.vocals || {} },
+        { key: 'tempoBands', label: 'Tempo', values: criteria.tempoBands || {} },
+        { key: 'keys', label: 'Key', values: criteria.keys || {} },
+        { key: 'artists', label: 'Artists', values: criteria.artists || {} }
+    ];
+    
+    sections.forEach(section => {
+        const values = Object.keys(section.values).sort();
+        if (!values.length) return;
+        
+        const div = document.createElement('details');
+        div.open = section.key === 'genre' || section.key === 'mood'; // Open first two by default
+        div.style.marginBottom = '15px';
+        div.innerHTML = `
+            <summary style="cursor: pointer; font-weight: bold; padding: 5px 0; user-select: none;">
+                ${section.label} (${values.length})
+            </summary>
+            <div style="padding-left: 10px; max-height: 200px; overflow-y: auto;">
+                ${values.map(val => `
+                    <label style="display: block; margin: 3px 0; cursor: pointer;">
+                        <input type="checkbox" data-facet="${section.key}" value="${val}" style="margin-right: 5px;">
+                        <span style="font-size: 14px;">${val} (${section.values[val]})</span>
+                    </label>
+                `).join('')}
+            </div>
+        `;
+        container.appendChild(div);
+    });
+}
+
+function setupFilterHandlers() {
+    // Clear filters button
+    const clearBtn = document.getElementById('clear-filters');
+    if (clearBtn) {
+        clearBtn.onclick = async () => {
+            document.querySelectorAll('#search-filters input[type="checkbox"]').forEach(cb => {
+                cb.checked = false;
+            });
+            window.__activeFilters = {};
+            const toShow = window.__searchTracks.slice(0, 20);
+            await ensureWaveforms(toShow);
+            renderResults(toShow);
+        };
     }
     
-    function trackMatches(track, filters) {
+    // Individual filter checkboxes
+    document.getElementById('search-filters').addEventListener('change', async (e) => {
+        if (e.target.type !== 'checkbox') return;
+        
+        const facet = e.target.dataset.facet;
+        const value = e.target.value;
+        
+        if (!window.__activeFilters[facet]) {
+            window.__activeFilters[facet] = new Set();
+        }
+        
+        if (e.target.checked) {
+            window.__activeFilters[facet].add(value);
+        } else {
+            window.__activeFilters[facet].delete(value);
+            if (window.__activeFilters[facet].size === 0) {
+                delete window.__activeFilters[facet];
+            }
+        }
+        
+        // Apply filters
+        const filtered = filterTracks(window.__searchTracks, window.__activeFilters);
+        const toShow = filtered.slice(0, 50); // Cap at 50 for performance
+        await ensureWaveforms(toShow);
+        renderResults(toShow);
+    });
+}
+
+function filterTracks(tracks, filters) {
+    if (!filters || Object.keys(filters).length === 0) {
+        return tracks;
+    }
+    
+    return tracks.filter(track => {
         for (const [facet, values] of Object.entries(filters)) {
-            if (!values.length) continue;
+            if (values.size === 0) continue;
             
             let trackValues = [];
             
+            // Handle different facet sources
             if (facet === 'instrument') {
-                trackValues = track.creative?.instrument || track.instrument || [];
-                
+                // Combine creative instruments and audio probes
+                trackValues = track.creative?.instrument || [];
                 if (track.audio_probes) {
                     Object.entries(track.audio_probes).forEach(([key, val]) => {
                         if (val === true) {
-                            trackValues.push(key.charAt(0).toUpperCase() + key.slice(1));
+                            trackValues.push(key);
                         }
                     });
                 }
+            } else if (facet === 'vocals') {
+                // Handle boolean vocals as yes/no
+                const hasVocals = track.creative?.vocals || track.audio_probes?.vocals;
+                trackValues = hasVocals ? ['yes'] : ['no'];
+            } else if (facet === 'tempoBands') {
+                // Use tempoBand field
+                trackValues = track.tempoBand ? [track.tempoBand] : [];
+            } else if (facet === 'artists') {
+                // Use artist field
+                trackValues = track.artist ? [track.artist] : [];
             } else {
+                // Standard array fields from creative
                 trackValues = track.creative?.[facet] || track[facet] || [];
             }
             
-            const hasMatch = values.some(v => 
-                trackValues.some(tv => 
-                    tv === v || tv.toLowerCase() === v.toLowerCase()
+            // Convert to array if string
+            if (typeof trackValues === 'string') {
+                trackValues = [trackValues];
+            }
+            
+            // Check if any filter value matches
+            const hasMatch = Array.from(values).some(filterVal => 
+                trackValues.some(trackVal => 
+                    String(trackVal).toLowerCase() === String(filterVal).toLowerCase()
                 )
             );
             
             if (!hasMatch) return false;
         }
         return true;
+    });
+}
+
+function renderResults(tracks) {
+    const container = document.getElementById('results-container');
+    if (!container) return;
+    
+    if (!tracks.length) {
+        container.innerHTML = '<p style="padding: 20px;">No matching tracks found.</p>';
+        return;
     }
     
-    function runSearch() {
-        selectedFilters = {};
+    container.innerHTML = '';
+    
+    tracks.forEach((track, index) => {
+        const title = track.title || track.id3?.title || 
+                     track.path?.split('/').pop()?.replace(/\.(mp3|wav)$/i, '') || 
+                     'Unknown Track';
+        const artist = track.artist || track.id3?.artist || '';
         
-        document.querySelectorAll('#search-filters input[type="checkbox"]:checked').forEach(cb => {
-            const facet = cb.dataset.facet;
-            if (!selectedFilters[facet]) selectedFilters[facet] = [];
-            selectedFilters[facet].push(cb.value);
-        });
+        const card = document.createElement('div');
+        card.style.cssText = 'border: 1px solid #e5e5e5; border-radius: 8px; padding: 15px; margin-bottom: 15px; background: white;';
+        card.dataset.trackPath = track.path;
         
-        const filtered = searchDB.tracks.filter(track => trackMatches(track, selectedFilters));
-        renderResults(filtered);
+        // Build waveform with click-to-seek
+        let waveformHtml = '';
+        if (track.waveform_png) {
+            const waveformUrl = makeFileUrl(track.waveform_png);
+            waveformHtml = `
+                <div style="position: relative; margin: 10px 0; cursor: pointer;" class="waveform-container" data-path="${track.path}">
+                    <img src="${waveformUrl}" 
+                         style="width: 100%; height: 60px; object-fit: cover; border-radius: 4px; display: block;"
+                         onerror="this.style.display='none'">
+                    <div class="playhead" style="position: absolute; top: 0; left: 0; width: 2px; height: 60px; background: red; display: none; pointer-events: none;"></div>
+                </div>
+            `;
+        } else {
+            waveformHtml = '<div style="height: 60px; background: #f5f5f5; border-radius: 4px; margin: 10px 0; display: flex; align-items: center; justify-content: center; color: #999;">No waveform</div>';
+        }
+        
+        card.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 5px;">
+                <div style="flex: 1;">
+                    <h4 style="margin: 0; font-size: 16px;">${title}</h4>
+                    ${artist ? `<p style="color: #666; margin: 2px 0; font-size: 14px;">${artist}</p>` : ''}
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button class="play-btn" data-path="${track.path}" 
+                            style="padding: 6px 12px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 12px;">
+                        Play
+                    </button>
+                    <button onclick="window.api.searchShowFile('${track.path.replace(/'/g, "\\'").replace(/"/g, '\\"')}')" 
+                            style="padding: 6px 12px; background: #007AFF; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 12px;">
+                        Finder
+                    </button>
+                </div>
+            </div>
+            ${waveformHtml}
+        `;
+        
+        container.appendChild(card);
+    });
+    
+    // Wire up play buttons
+    document.querySelectorAll('.play-btn').forEach(btn => {
+        btn.onclick = () => togglePlayback(btn.dataset.path);
+    });
+    
+    // Wire up waveform click-to-seek
+    document.querySelectorAll('.waveform-container').forEach(container => {
+        container.onclick = (e) => {
+            const rect = container.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const percent = x / rect.width;
+            seekToPercent(container.dataset.path, percent);
+        };
+    });
+}
+
+function togglePlayback(path) {
+    if (currentPlayingPath === path && !currentAudio.paused) {
+        stopPlayback();
+    } else {
+        startPlayback(path);
+    }
+}
+
+function startPlayback(path) {
+    // Stop any current playback
+    stopPlayback();
+    
+    // Set new source
+    currentAudio.src = makeFileUrl(path);
+    currentPlayingPath = path;
+    
+    // Update UI
+    document.querySelectorAll('.play-btn').forEach(btn => {
+        btn.textContent = btn.dataset.path === path ? 'Pause' : 'Play';
+        btn.style.background = btn.dataset.path === path ? '#ef4444' : '#10b981';
+    });
+    
+    // Show and animate playhead for this track
+    const container = document.querySelector(`.waveform-container[data-path="${path}"]`);
+    if (container) {
+        const playhead = container.querySelector('.playhead');
+        if (playhead) {
+            playhead.style.display = 'block';
+            
+            // Use requestAnimationFrame for smooth updates
+            const updatePlayhead = () => {
+                if (!currentAudio || currentAudio.paused || currentPlayingPath !== path) {
+                    return;
+                }
+                if (currentAudio.duration && isFinite(currentAudio.duration)) {
+                    const percent = currentAudio.currentTime / currentAudio.duration;
+                    playhead.style.left = (percent * 100) + '%';
+                }
+                playheadAnimationId = requestAnimationFrame(updatePlayhead);
+            };
+            
+            // Cancel any existing animation
+            if (playheadAnimationId) {
+                cancelAnimationFrame(playheadAnimationId);
+            }
+            
+            playheadAnimationId = requestAnimationFrame(updatePlayhead);
+        }
     }
     
-    function clearFilters() {
-        document.querySelectorAll('#search-filters input[type="checkbox"]').forEach(cb => {
-            cb.checked = false;
+    currentAudio.play().catch(e => {
+        console.error('[SEARCH] Play failed:', e);
+        stopPlayback();
+    });
+}
+
+function stopPlayback() {
+    if (currentAudio) {
+        currentAudio.pause();
+    }
+    
+    // Cancel playhead animation
+    if (playheadAnimationId) {
+        cancelAnimationFrame(playheadAnimationId);
+        playheadAnimationId = null;
+    }
+    
+    // Reset all UI
+    document.querySelectorAll('.play-btn').forEach(btn => {
+        btn.textContent = 'Play';
+        btn.style.background = '#10b981';
+    });
+    
+    document.querySelectorAll('.playhead').forEach(playhead => {
+        playhead.style.display = 'none';
+        playhead.style.left = '0';
+    });
+    
+    currentPlayingPath = null;
+}
+
+function seekToPercent(path, percent) {
+    if (currentPlayingPath !== path) {
+        startPlayback(path);
+    }
+    
+    // Handle seeking before metadata loads
+    if (!currentAudio.duration || !isFinite(currentAudio.duration)) {
+        currentAudio.addEventListener('loadedmetadata', function onMetadata() {
+            currentAudio.removeEventListener('loadedmetadata', onMetadata);
+            if (currentAudio.duration && isFinite(currentAudio.duration)) {
+                currentAudio.currentTime = currentAudio.duration * percent;
+            }
         });
-        showRandomTracks();
+    } else {
+        currentAudio.currentTime = currentAudio.duration * percent;
     }
 }
 

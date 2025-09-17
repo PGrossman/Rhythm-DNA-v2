@@ -4,6 +4,10 @@ console.log('[PRELOAD] Loading preload script');
 // Expose a minimal API surface, matching the strict IPC+DOM contract
 contextBridge.exposeInMainWorld('api', {
 	ping: () => 'pong',
+	toFileUrl: (path) => {
+		const { pathToFileURL } = require('node:url');
+		return pathToFileURL(path).href;
+	},
 	// IPC invoke methods (Renderer → Main)
 	scanDropped: (paths) => ipcRenderer.invoke('scanDropped', { paths }),
 	startAnalysis: (options) => ipcRenderer.invoke('startAnalysis', options),
