@@ -5,6 +5,8 @@
     "scripts": {
         "start": "npx electron-forge start",
         "package": "npx electron-forge package",
+        "make": "npx electron-forge make",
+        "build": "npx electron-forge make --platform=darwin --arch=arm64",
         "get-ast": "bash scripts/get-ast.sh",
         "get-clap": "bash scripts/get-clap.sh",
         "warm-models": "node scripts/warm-xenova-models.js",
@@ -16,6 +18,7 @@
     },
     "devDependencies": {
         "@electron-forge/cli": "^6.4.0",
+        "@electron-forge/maker-dmg": "^7.9.0",
         "@electron-forge/maker-zip": "^6.4.0",
         "electron": "^30.0.0"
     },
