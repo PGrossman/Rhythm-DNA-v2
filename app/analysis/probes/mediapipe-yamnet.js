@@ -87,7 +87,8 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 		
 		// Alias-based flexible matching
 		const ALIASES = {
-			vocals: ['vocal', 'vocal music', 'singing', 'speech', 'singer'],
+			// Remove 'speech' to avoid instrumentals being flagged as vocals
+			vocals: ['vocal', 'vocal music', 'singing', 'singer'],
 			brass: ['brass instrument', 'horn', 'trumpet', 'trombone', 'saxophone'],
 			trumpet: ['trumpet'],
 			trombone: ['trombone'],
@@ -101,9 +102,10 @@ async function probeYamnet(filePath, durationSec, opts = {}) {
 		
 		const s = (n) => scoreOf(top, n);
 		const sAny = (arr) => Math.max(0, ...arr.map(s));
+		const VOCAL_THRESHOLD = 0.12; // was 0.06 - higher = fewer false positives
 		const hints = {
 			// Slightly lowered thresholds
-			vocals: sAny(ALIASES.vocals) >= 0.06,
+			vocals: sAny(ALIASES.vocals) >= VOCAL_THRESHOLD,
 			brass: sAny(ALIASES.brass) >= 0.06,
 			trumpet: sAny(ALIASES.trumpet) >= 0.05,
 			trombone: sAny(ALIASES.trombone) >= 0.05,

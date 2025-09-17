@@ -884,9 +884,16 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b', dbFolder = n
     if (probes.hints.piano) add(creative.instrument, 'Piano');
     if (probes.hints.drumkit) add(creative.instrument, 'Drum Kit (acoustic)');
     
-    if ((probes.hints.vocals || probes.hints.choir) &&
+    // Only infer background vocals if choir specifically detected
+    if (probes.hints.choir &&
         (creative.vocals.length === 0 || creative.vocals.includes('No Vocals'))) {
       creative.vocals = ['Background Vocals'];
+    }
+
+    // If probes say NO vocals/choir, veto LLM vocals to avoid false positives
+    if (!probes.hints.vocals && !probes.hints.choir &&
+        creative.vocals && !creative.vocals.includes('No Vocals')) {
+      creative.vocals = ['No Vocals'];
     }
   }
   

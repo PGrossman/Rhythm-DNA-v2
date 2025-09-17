@@ -114,10 +114,26 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 
     // Zero-shot disabled - to re-enable use a zero-shot audio model, e.g. 'Xenova/clap-htsat-unfused'
 
-	const hints = orHints(
+	// Check if each probe stack detected vocals
+	const vocalsClap = Boolean(
+		(clapIntro.hints && clapIntro.hints.vocals) ||
+		(clapMiddle.hints && clapMiddle.hints.vocals) ||
+		(clapOutro.hints && clapOutro.hints.vocals)
+	);
+	const vocalsAst = Boolean(
+		(intro.hints && intro.hints.vocals) ||
+		(middle.hints && middle.hints.vocals) ||
+		(outro.hints && outro.hints.vocals)
+	);
+
+	// Existing merge (change const to let):
+	let hints = orHints(
 		orHints(clapIntro.hints, clapMiddle.hints),
 		orHints(clapOutro.hints, orHints(intro.hints, orHints(middle.hints, outro.hints)))
 	);
+
+	// STRONGER rule for vocals: must be seen by BOTH stacks
+	hints.vocals = Boolean(vocalsClap && vocalsAst);
     const allScores = Object.assign({}, clapIntro.scores || {}, clapMiddle.scores || {}, clapOutro.scores || {});
     cleanHints(hints, allScores);
 

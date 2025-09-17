@@ -84,7 +84,8 @@ const VOCAB = {
 	trombone: ['trombone'],
 	ukulele: ['ukulele'],
 	woodwinds: ['woodwinds', 'wind instruments'],
-	vocals: ['vocals', 'singing', 'voice', 'vocal']
+	// Drop 'voice'/'vocal' — too broad; keep 'singing'/'vocals'
+	vocals: ['vocals', 'singing']
 };
 
 const THRESHOLDS = {
@@ -115,7 +116,7 @@ const THRESHOLDS = {
 	trombone: 0.08,
 	ukulele: 0.15,
 	woodwinds: 0.12,
-	vocals: 0.08
+	vocals: 0.20  // was 0.08 - much stricter
 };
 
 function buildLabels() {
