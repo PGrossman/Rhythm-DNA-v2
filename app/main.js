@@ -16,7 +16,11 @@ let settings = {
     autoUpdateDb: false,
     ollamaModel: 'qwen3:8b',
     techConcurrency: 4,
-    creativeConcurrency: 2
+    creativeConcurrency: 2,
+    smbShares: {
+        // Add your SMB share mappings here
+        // Example: "MediaShare": "smb://nas.local/MediaShare"
+    }
 };
 
 // DB paths helper
@@ -102,7 +106,7 @@ const getInstalledModels = async () => {
 const createWindow = () => {
     const win = new BrowserWindow({
         width: 1200,
-        height: 800,
+        height: 980,  // Tall enough for 10 cards comfortably
         webPreferences: {
             preload: path.join(app.getAppPath(), 'app', 'preload.js'),
             contextIsolation: true,
@@ -303,6 +307,38 @@ const createWindow = () => {
     });
     
     // Waveform PNG generation with lazy require to avoid circular imports
+    // SMB auto-mount handler for NAS shares
+    ipcMain.handle('system:ensure-mounted', async (_evt, mountPoint, smbUrl) => {
+        const fs = require('fs');
+        const { execFile } = require('child_process');
+        
+        try {
+            // Check if already mounted
+            if (fs.existsSync(mountPoint)) {
+                return { ok: true, already: true };
+            }
+            
+            // Use AppleScript to mount SMB share (uses Keychain for auth)
+            await new Promise((resolve, reject) => {
+                const script = `try
+                    mount volume "${smbUrl}"
+                end try`;
+                
+                execFile('/usr/bin/osascript', ['-e', script], (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
+            });
+            
+            // Check if mount succeeded
+            const ok = fs.existsSync(mountPoint);
+            return { ok };
+        } catch (e) {
+            console.log('[SMB] Mount failed:', e.message);
+            return { ok: false, error: e.message };
+        }
+    });
+
     ipcMain.handle('waveform:get-png', async (_evt, absPath, opts = {}) => {
         try {
             const path = require('node:path');

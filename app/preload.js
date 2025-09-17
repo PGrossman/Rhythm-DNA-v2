@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('api', {
 	searchGetVersions: (path) => ipcRenderer.invoke('search:getVersions', path),
 	searchReadJson: (path) => ipcRenderer.invoke('search:readJson', path),
 	getWaveformPng: (absPath, options) => ipcRenderer.invoke('waveform:get-png', absPath, options),
+	ensureMounted: (mountPoint, smbUrl) => ipcRenderer.invoke('system:ensure-mounted', mountPoint, smbUrl),
 
 	// Event listeners (Main → Renderer)
 	onQueueUpdate: (callback) => ipcRenderer.on('queueUpdate', callback),
