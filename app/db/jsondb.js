@@ -70,7 +70,7 @@ function tempoToBand(bpm) {
 function mergeTrack(oldRec = {}, newRec = {}) {
   const out = { ...oldRec };
   const scalarKeys = [
-    'file','path','analyzed_at','duration_sec','sample_rate_hz','channels',
+    'file','path','analyzed_at','title','artist','waveform_png','duration_sec','sample_rate_hz','channels',
     'bit_rate','lufs_integrated','loudness_range','true_peak_db','estimated_tempo_bpm','key'
   ];
   for (const k of scalarKeys) {

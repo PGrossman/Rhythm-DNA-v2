@@ -225,7 +225,7 @@ const createWindow = () => {
             console.log('[MAIN] Analyzing:', filePath);
             // Pass the window to send progress events
             const { analyzeMp3 } = require('./analysis/ffcalc.js');
-            const result = await analyzeMp3(filePath, win, settings.ollamaModel);
+            const result = await analyzeMp3(filePath, win, settings.ollamaModel, settings.dbFolder);
             console.log('[MAIN] Analysis complete:', result.jsonPath);
             
             // Upsert into Main DB and optionally update criteria
@@ -306,15 +306,18 @@ const createWindow = () => {
     ipcMain.handle('waveform:get-png', async (_evt, absPath, opts = {}) => {
         try {
             const path = require('node:path');
-            const os = require('node:os');
-            const cacheRoot = opts.cacheRoot || 
-                path.join(os.homedir(), 'Library', 'Application Support', 'RhythmRNA', 'waveforms');
             
-            // LAZY require - only loads when handler runs, avoiding circular deps
-            const { ensureWaveformPNG } = require('./lib/waveform-png.cjs');
+            // Always place PNGs alongside the DB, under 'waveforms' folder (plural)
+            const dbRoot = settings.dbFolder || path.join(app.getPath('userData'), 'RhythmDNA');
+            const cacheRoot = path.join(dbRoot, 'waveforms');  // NOTE: plural 'waveforms'
             
-            const png = await ensureWaveformPNG(absPath, cacheRoot);
-            return { ok: true, png };
+            // Use the analysis waveform generator for consistency
+            const { ensureWaveformPng } = require('./analysis/waveform-png.js');
+            const { pngPath } = await ensureWaveformPng(absPath, { 
+                dbFolder: dbRoot,
+                durationSec: null  // Will be calculated if needed
+            });
+            return { ok: true, png: pngPath };
         } catch (e) {
             console.error('[WAVEFORM IPC] Error:', e.message);
             return { ok: false, error: e.message };

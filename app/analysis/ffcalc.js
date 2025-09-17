@@ -754,7 +754,7 @@ function getDefaultCreative() {
   };
 }
 
-async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
+async function analyzeMp3(filePath, win = null, model = 'qwen3:8b', dbFolder = null) {
   const baseName = path.basename(filePath, path.extname(filePath));
   // Send technical starting event
   if (win) {
@@ -955,6 +955,23 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b') {
     .join('\n');
   
   await fs.writeFile(csvPath, csvContent);
+  
+  // Generate waveform PNG if dbFolder provided
+  if (dbFolder) {
+    try {
+      const { ensureWaveformPng } = require('./waveform-png.js');
+      const waveformResult = await ensureWaveformPng(filePath, {
+        dbFolder: dbFolder,
+        durationSec: analysis.duration_sec
+      });
+      analysis.waveform_png = waveformResult.pngPath;
+      
+      // Re-write JSON with waveform path
+      await fs.writeFile(jsonPath, JSON.stringify(analysis, null, 2));
+    } catch (e) {
+      console.log('[WAVEFORM] PNG generation failed:', e.message);
+    }
+  }
   
   return { analysis, jsonPath, csvPath };
 }
