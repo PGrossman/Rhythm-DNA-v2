@@ -17,6 +17,7 @@ node_modules
 app/py/.venv/
 
 # Python virtual environment
+.venv/
 app/py/.venv/
 app/py/__pycache__/
 app/py/*.pyc
