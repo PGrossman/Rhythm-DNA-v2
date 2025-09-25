@@ -14,3 +14,23 @@ node_modules
 
 # Hugging Face venv
 .hf/
+app/py/.venv/
+
+# Python virtual environment
+app/py/.venv/
+app/py/__pycache__/
+app/py/*.pyc
+
+# Model files (too large for git)
+app/models/
+
+# Build artifacts
+out/
+build/
+
+# Logs
+Logs/
+app/Logs/
+
+# Large zip files
+*.zip

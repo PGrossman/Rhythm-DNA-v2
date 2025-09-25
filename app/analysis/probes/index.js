@@ -31,14 +31,37 @@ function orHints(a = {}, b = {}) {
 
 // Suppress false positives in merged hints using probe scores when available
 function cleanHints(hints, scores = {}) {
-    // Suppress banjo if guitar/electric guitar is clearly stronger
+    // 1) Banjo vs Guitar – keep existing rule
     if (hints.banjo && hints.guitar) {
-        const banjoScore = scores.banjo || 0;
+        const banjoScore  = scores.banjo || 0;
         const guitarScore = Math.max(scores.guitar || 0, scores['electric guitar'] || 0);
         if (guitarScore > banjoScore * 1.5) {
             hints.banjo = false;
         }
     }
+
+    // 2) Brass gating – avoid generic "brass" unless there's real evidence
+    if (hints.brass) {
+        const brass     = scores.brass || 0;
+        const trumpet   = scores.trumpet || 0;
+        const trombone  = scores.trombone || 0;
+        const sax       = scores.saxophone || 0;
+        const piano     = scores.piano || 0;
+
+        // A family hit means any of the specific brass instruments are present
+        const familyHit = (trumpet >= 0.18) || (trombone >= 0.16) || (sax >= 0.18);
+
+        // If no family instrument and generic brass is weak, drop it
+        if (!familyHit && brass < 0.22) {
+            hints.brass = false;
+        }
+
+        // Piano-only veto: strong piano, weak brass family, and not-strong generic brass
+        if (hints.brass && piano >= 0.35 && !familyHit && brass < 0.28) {
+            hints.brass = false;
+        }
+    }
+
     return hints;
 }
 
@@ -144,9 +167,39 @@ async function runAudioProbes(filePath, durationSec, baseName = '', opts = {}) {
 		middle: (middle.labels || []).slice(0, 10),
 		outro: (outro.labels || []).slice(0, 10)
 	};
-	return { status, hints, labels, meta: { introLen, windows: ['0-30s', '50%', '70%'] } };
+	const scores = {
+		intro: clapIntro.scores || {},
+		middle: clapMiddle.scores || {},
+		outro: clapOutro.scores || {}
+	};
+	
+	// Format for new aggregation function
+	const windowsProbes = [
+		{
+			clapTop: Object.entries(clapIntro.scores || {}).map(([label, score]) => ({ label, score })).sort((a, b) => b.score - a.score).slice(0, 10),
+			astLabels: (intro.labels || []).slice(0, 10)
+		},
+		{
+			clapTop: Object.entries(clapMiddle.scores || {}).map(([label, score]) => ({ label, score })).sort((a, b) => b.score - a.score).slice(0, 10),
+			astLabels: (middle.labels || []).slice(0, 10)
+		},
+		{
+			clapTop: Object.entries(clapOutro.scores || {}).map(([label, score]) => ({ label, score })).sort((a, b) => b.score - a.score).slice(0, 10),
+			astLabels: (outro.labels || []).slice(0, 10)
+		}
+	];
+	
+	return { status, hints, labels, scores, windowsProbes, meta: { introLen, windows: ['0-30s', '50%', '70%'] } };
 }
 
-module.exports = { runAudioProbes };
+// Instrument aliases for woodwinds mapping
+const INSTRUMENT_ALIASES = {
+    flute: ["flute", "alto flute", "piccolo", "recorder"],
+    clarinet: ["clarinet", "bass clarinet"],
+    oboe: ["oboe", "english horn"],
+    bassoon: ["bassoon"]
+};
+
+module.exports = { runAudioProbes, INSTRUMENT_ALIASES };
 
 

@@ -1,10 +1,940 @@
-// app/analysis/ffcalc.js - CommonJS module for ffmpeg analysis
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const fs = require('node:fs').promises;
+'use strict';
+
+// --- Node + deps (at the very top to avoid temporal dead zone) ---
+const nodePath = require('path');
+const fsp = require('fs/promises');
+const { spawn } = require('child_process');
+const { analyzeWithEnsemble, mapResultToAnalysis } = require('./ensemble_runner');
+const fs = require('node:fs');               // for statSync/readFileSync
+const { BrowserWindow } = require("electron");
+
+let __acfConfidence = null; // last ACF confidence (0..1) for the most recent fallback run
+// Toggle verbose tempo debugging (byte counts, window starts, widen retries).
+// Enable by running the app with TEMPO_DEBUG=1 (or "true").
+const TEMPO_DEBUG =
+  process.env.TEMPO_DEBUG === '1' ||
+  process.env.TEMPO_DEBUG === 'true';
+const tempoDbg = (...args) => { if (TEMPO_DEBUG) console.log(...args); };
+
+// CSV writing toggle: default OFF; set RNA_WRITE_CSV=1 to re-enable
+const WRITE_CSV = (process.env.RNA_WRITE_CSV === "1");
+
+// Import CSV writer for settings-based control
+const { shouldWriteCsv } = require('../utils/csvWriter');
+
+// (fs already required elsewhere)
+// (path already required elsewhere)
+
+// v1.0.0: Orchestration mode toggle
+const INSTRUMENTATION_MODE = process.env.RNA_INSTRUMENTATION_MODE || "CONCURRENT"; // "SEQUENTIAL" or "CONCURRENT"
+
+// --- Helpers: DB-scoped logs + filename slug + safe JSON parse ---
+function getDbLogsDir(dbFolder) {
+  return nodePath.join(dbFolder, 'Logs');
+}
+
+function slugifyBase(basename) {
+  return String(basename).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+async function writeLogFileStrict(dir, filename, contents) {
+  await fsp.mkdir(dir, { recursive: true });
+  const p = nodePath.join(dir, filename);
+  await fsp.writeFile(p, contents, 'utf8');
+  console.log('[CREATIVE-LOG-WRITE] Wrote:', p);
+  return p;
+}
+
+// Try hard to coerce a model response into valid JSON.
+function sanitizeAndParseJson(raw) {
+  if (raw == null) throw new Error('Empty creative output');
+  let s = String(raw);
+  s = s.replace(/```(?:json)?\s*([\s\S]*?)```/gi, '$1').trim();
+  const first = s.indexOf('{');
+  const last = s.lastIndexOf('}');
+  if (first !== -1 && last !== -1 && last > first) s = s.slice(first, last + 1);
+  s = s.replace(/,(\s*[}\]])/g, '$1');
+  s = s.replace(/[\u0000-\u001F\u007F]/g, ' ');
+  return JSON.parse(s);
+}
+
+// v2.1.0: Instrumentation progress helper
+function sendInstrProgress(filePath, percent, label) {
+  const win = BrowserWindow.getAllWindows()[0];
+  if (!win) return;
+  win.webContents.send("instrumentation:progress", { filePath, percent, note: label });
+}
+
+// v1.0.0: Instrumentation progress helper (legacy)
+function emitInstrumentationProgress(win, filePath, pct, label = null) {
+  if (win) {
+    win.webContents.send('instrumentation:progress', {
+      filePath: filePath,
+      percent: pct,
+      note: label || null
+    });
+  }
+}
+
+// --- CREATIVE UI HELPERS (mirror instrumentation events) ---------------------
+function sendCreativeUI(filePath, { status, percent, note } = {}) {
+  const win = BrowserWindow.getAllWindows()[0];
+  if (!win) return;
+  // Keep legacy jobProgress (stage=creative)
+  if (status) {
+    win.webContents.send('jobProgress', {
+      trackId: filePath,
+      stage: 'creative',
+      status: String(status).toUpperCase(), // PROCESSING | COMPLETE | ERROR
+      note: note || ''
+    });
+  }
+  // Also emit dedicated creative channels like instrumentation
+  if (typeof percent === 'number') {
+    win.webContents.send('creative:progress', { filePath, percent });
+  }
+  if (status) {
+    // normalize to renderer's lowercase convention
+    const norm =
+      /complete/i.test(status) ? 'complete' :
+      /error/i.test(status)    ? 'error'    :
+                                 'processing';
+    win.webContents.send('creative:status', { filePath, status: norm, note: note || '' });
+  }
+}
+
+// Safe event sender that won't break the pipeline if sending fails
+function safeSend(channel, data) {
+  try {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win && win.webContents) {
+      win.webContents.send(channel, data);
+    }
+  } catch (_) {
+    // best-effort UI hint; do not break pipeline if send fails
+  }
+}
+
+// v2.1.0: Run instrumentation analysis with KISS progress checkpoints
+async function runInstrumentationAnalysis(filePath, win, audioHints = {}) {
+  try {
+    console.log('[INSTRUMENTATION] Starting analysis for:', nodePath.basename(filePath));
+    
+    // v3.0.0: Send explicit start event and 0% checkpoint
+    if (win) win.webContents.send('analysis:instrumentation:start', { file: filePath });
+    if (win) win.webContents.send('instrumentation:status', { filePath, status: 'processing' });
+    sendInstrProgress(filePath, 0, "processing");
+    
+    // Run ensemble analysis with progress callbacks and stdout parsing
+    const result = await analyzeWithEnsemble(filePath, { 
+      demucs: true, 
+      progressCallback: (pct, stage) => {
+        // Map ensemble progress to our KISS checkpoints
+        if (pct >= 25) sendInstrProgress(filePath, 25); // After Demucs
+        if (pct >= 50) sendInstrProgress(filePath, 50); // After PANNs
+        if (pct >= 75) sendInstrProgress(filePath, 75); // After YAMNet
+      },
+      stdoutCallback: (data) => {
+        // v1.0.0: Parse stdout for specific milestones
+        const output = data.toString();
+        if (output.includes('mode=mix-only')) {
+          if (win) win.webContents.send('instrumentation:progress', { filePath, percent: 25, note: 'models running' });
+        }
+        if (output.includes('Debug dump saved') || output.includes('decision_trace')) {
+          if (win) win.webContents.send('instrumentation:progress', { filePath, percent: 50, note: 'decision trace' });
+        }
+        if (output.includes('FINAL instruments')) {
+          if (win) win.webContents.send('instrumentation:progress', { filePath, percent: 75, note: 'finalizing' });
+        }
+      }
+    });
+    
+    // 100% - Complete
+    sendInstrProgress(filePath, 100);
+    
+    // v1.0.0: Send completion status
+    if (result && (result.instruments || result.finalInstruments)) {
+      if (win) win.webContents.send('instrumentation:progress', { filePath, percent: 100 });
+      if (win) win.webContents.send('instrumentation:status', { filePath, status: 'complete' });
+    } else {
+      if (win) win.webContents.send('instrumentation:status', { filePath, status: 'error' });
+    }
+    
+    return result;
+  } catch (error) {
+    console.error('[INSTRUMENTATION] Error:', error);
+    sendInstrProgress(filePath, 100);
+    if (win) win.webContents.send('instrumentation:status', { filePath, status: 'error' });
+    return { error: error.message, instruments: [] };
+  }
+}
+
+// --- ENSEMBLE LOGGING (local, crash-proof) -------------------------------
+const LOG_DIR = '/Volumes/ATOM RAID/Dropbox/_Personal Files/12 - AI Vibe Coding/02 - Cursor Projects/02 - RhythmRNA V3/Logs';
+function ensureDirSafe(dir) { try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {} }
+function writeJsonSafe(file, obj) {
+  try { ensureDirSafe(path.dirname(file)); fs.writeFileSync(file, JSON.stringify(obj, null, 2)); } catch (_) {}
+}
+// [1] ADD these utility defs near the top of the file (after imports/require)
+const TAG = '[ENSEMBLE]';
+const log  = (...args) => console.log(TAG, ...args);
+const warn = (...args) => console.warn(TAG, ...args);
+const err  = (...args) => console.error(TAG, ...args);
+
+// --- CREATIVE LOGGING (local, crash-proof) -------------------------------
+function _creativeLogDir() {
+  // Keep logs alongside the other app logs:
+  // app/Logs relative to this file's directory.
+  // (Matches the ensemble debug location pattern.)
+  return nodePath.resolve(__dirname, "../Logs");
+}
+function _ensureDir(p) {
+  try { fs.mkdirSync(p, { recursive: true }); } catch (_) {}
+}
+function _stamp() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+}
+function _writeCreativeDebug(baseName, contents) {
+  const dir = _creativeLogDir();
+  _ensureDir(dir);
+  const file = nodePath.join(dir, `${baseName}.log`);
+  try { fs.writeFileSync(file, contents ?? "", "utf8"); } catch (_) {}
+  return file;
+}
+
+// Heuristic JSON extractor/repairer:
+// - strips code fences
+// - extracts the largest {...} block
+// - removes trailing commas before } and ]
+// - normalizes fancy quotes
+// - tries again if the first parse fails
+function safeParseCreative(rawText, context = {}) {
+  const ctx = {
+    file: context.file || "unknown_file",
+    model: context.model || "unknown_model",
+    temp: context.temp ?? "n/a",
+  };
+
+  const stamp = _stamp();
+  const base = `creative-raw-${stamp}`;
+  // If a parsed object was passed in by mistake, just return a deep copy.
+  if (rawText && typeof rawText === "object") {
+    try {
+      const copy = JSON.parse(JSON.stringify(rawText));
+      _writeCreativeDebug(base, `--- CREATIVE OBJECT (already parsed) (${ctx.model} @ temp=${ctx.temp}) for ${ctx.file} ---\n` + JSON.stringify(copy, null, 2) + "\n");
+      return copy;
+    } catch (_) {
+      // fall through to string handling if deep copy fails
+    }
+  }
+  _writeCreativeDebug(base, `--- RAW LLM OUTPUT (${ctx.model} @ temp=${ctx.temp}) for ${ctx.file} ---\n${rawText}\n`);
+
+  let t = String(rawText || "");
+
+  // Strip code fences ```json ... ``` or ``` ... ```
+  t = t.replace(/```json[\s\S]*?```/gi, m => m.replace(/```json|```/gi, "")).trim();
+  t = t.replace(/```[\s\S]*?```/g, m => m.replace(/```/g, "")).trim();
+
+  // Normalize curly quotes to regular quotes
+  t = t.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
+
+  // If there is extra prose around JSON, grab the largest JSON object substring.
+  // Find the first { and last } and slice.
+  const firstBrace = t.indexOf("{");
+  const lastBrace = t.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    t = t.slice(firstBrace, lastBrace + 1);
+  }
+
+  const tryParse = (s) => {
+    return JSON.parse(s);
+  };
+
+  // First attempt
+  try {
+    const parsed = tryParse(t);
+    _writeCreativeDebug(`${base}-parsed-ok`, JSON.stringify(parsed, null, 2));
+    return parsed;
+  } catch (e1) {
+    // Attempt light repairs, then parse again
+    let repaired = t;
+
+    // Remove trailing commas before } or ]
+    repaired = repaired.replace(/,\s*([}\]])/g, "$1");
+
+    // Quote unquoted keys (simple, conservative: keys without quotes followed by :)
+    // e.g., mood: []  ->  "mood": []
+    repaired = repaired.replace(/(\{|,)\s*([A-Za-z0-9_\-]+)\s*:/g, '$1 "$2":');
+
+    // Convert single-quoted strings to double-quoted (avoid touching contractions inside text by doing only JSON-looking segments)
+    // This is still heuristic; we keep it limited
+    repaired = repaired.replace(/:\s*'([^']*)'/g, ': "$1"');
+
+    try {
+      const parsed2 = tryParse(repaired);
+      _writeCreativeDebug(`${base}-parsed-repaired-ok`, JSON.stringify(parsed2, null, 2));
+      return parsed2;
+    } catch (e2) {
+      _writeCreativeDebug(`${base}-parse-error`, [
+        "--- ORIGINAL TEXT ---",
+        t,
+        "",
+        "--- FIRST ERROR ---",
+        String(e1 && e1.stack || e1),
+        "",
+        "--- REPAIRED TEXT ---",
+        repaired,
+        "",
+        "--- SECOND ERROR ---",
+        String(e2 && e2.stack || e2),
+        ""
+      ].join("\n"));
+      const err = new Error("Creative JSON parse failed after repair");
+      err._creative_raw_file = `${base}.log`;
+      err._creative_err_file = `${base}-parse-error.log`;
+      throw err;
+    }
+  }
+}
+const ELOG = (...args) => console.log('[ENSEMBLE]', ...args);
+const isNum = v => typeof v === 'number' && Number.isFinite(v);
+const num = v => (isNum(v) ? v : 0);
+const get = (obj, key, fallback) => (obj && Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : fallback);
+
+// Safe helpers so undefined never explodes downstream
+function safeDict(v) { return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {}; }
+function safeArr(v)  { return Array.isArray(v) ? v : []; }
+function safeBool(v) { return Boolean(v); }
+
+// Write a tiny debug file so we can inspect the raw Python JSON quickly
+function writeDebugDump(basename, payload) {
+  try {
+    // Create Logs directory if it doesn't exist
+    const logsDir = nodePath.join(__dirname, '..', 'Logs');
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+    
+    const outPath = nodePath.join(logsDir, `ensemble-debug-${basename.replace(/\W+/g,'_')}.json`);
+    fs.writeFileSync(outPath, JSON.stringify(payload, null, 2));
+    log('debug dump:', outPath);
+  } catch (e) {
+    warn('debug dump failed:', String(e && e.stack || e));
+  }
+}
+
+// ---------- [ENSEMBLE RESCUE HELPERS - BEGIN] ----------
+
+const ENSEMBLE_RESCUE_PRIORITY = [
+  'Electric Guitar',
+  'Acoustic Guitar',
+  'Bass Guitar',
+  'Drum Kit (acoustic)',
+  'Piano',
+  'Organ',
+  'Brass (section)',
+  'Strings',
+];
+
+function _bool(v) {
+  return !!(v === true || v === 'true' || v === 1 || v === '1' || v === 'yes');
+}
+
+function _deriveUsedDemucs(ens) {
+  if (!ens || typeof ens !== 'object') return false;
+  return _bool(
+    ens.usedDemucs ??
+    ens.used_demucs ??
+    ens.demucsUsed ??
+    ens.meta?.used_demucs ??
+    ens.meta?.usedDemucs ??
+    ens.meta?.demucsUsed
+  );
+}
+
+// Preferred display names we'll consider when rescuing from AUDIO_PROBE
+const PROBE_TO_DISPLAY = {
+  'electric guitar': 'Electric Guitar',
+  'acoustic guitar': 'Acoustic Guitar',
+  'bass': 'Bass Guitar',
+  'drumkit': 'Drum Kit (acoustic)',
+  'piano': 'Piano',
+  'organ': 'Organ',
+  // Optional sections (we keep conservative)
+  'brass': 'Brass (section)',
+  'strings': 'Strings',
+};
+
+function _rescueFromProbe(probe) {
+  if (!probe || typeof probe !== 'object') return [];
+  // probe.detected is already logged as: [AUDIO_PROBE] Detected: a, b, c
+  const detected = Array.isArray(probe.detected) ? probe.detected : [];
+  if (!detected.length) return [];
+  // Map lower-case probe names to display names, filter unknown
+  const mapped = [];
+  for (const raw of detected) {
+    const k = String(raw).toLowerCase();
+    if (k in PROBE_TO_DISPLAY) mapped.push(PROBE_TO_DISPLAY[k]);
+  }
+  // De-dup and sort by rescue priority, cap to 4 to stay conservative
+  const uniq = Array.from(new Set(mapped));
+  uniq.sort((a, b) => ENSEMBLE_RESCUE_PRIORITY.indexOf(a) - ENSEMBLE_RESCUE_PRIORITY.indexOf(b));
+  return uniq.slice(0, 4);
+}
+// ---------- [ENSEMBLE RESCUE HELPERS - END] ----------
+
+// [2] In the function that runs the Python analyzer (e.g., runEnsemble / analyzeEnsemble / execEnsemble),
+//     ensure options and hints are safely defaulted, and remove use of undeclared variables.
+async function runEnsemble(audioPath, options = {}) {
+  // SAFETY DEFAULTS
+  const {
+    demucs = false,
+    timeoutMs = 120000,
+    env = {},
+    hints = {},            // <— was throwing "hints is not defined" in some paths
+  } = options || {};
+
+  // Use the existing analyzeWithEnsemble function
+  const result = await analyzeWithEnsemble(audioPath, { demucs });
+
+  // After the process exits, parse and normalize:
+  let raw;
+  try {
+    raw = result; // result is already parsed JSON from analyzeWithEnsemble
+  } catch (e) {
+    err('JSON parse failed; result =>', String(result).slice(0, 400));
+    throw e;
+  }
+
+  // Hard normalization (so later code can't crash)
+  const normalized = safeDict(raw);
+  const instruments = safeArr(normalized.instruments);
+  const by_stem = safeDict(normalized.by_stem);
+  const decision = safeDict(normalized.decision_trace);
+  const used_demucs = safeBool(normalized.used_demucs);
+  const mode = normalized.mode || (used_demucs ? 'stems' : 'mix-only');
+
+  // Emit a compact log and a full dump for this track
+  const base = nodePath.basename(audioPath, nodePath.extname(audioPath));
+  log(`mode=${mode} used_demucs=${used_demucs} instruments: ${instruments.length ? instruments.join(', ') : '(none)'}`);
+  writeDebugDump(base, { parsed: { mode, used_demucs, instruments, by_stem_keys: Object.keys(by_stem), decision_trace_present: !!Object.keys(decision).length }, raw: normalized });
+
+  // [3] NEVER reference undeclared names; only use the locals above.
+  //     If you have existing code that logs `usedDemucs` (camelCase), replace it with `used_demucs`.
+  //     If you have code that logs with `log(...)`, it now exists (see [1]).
+
+  // [4] Optional: if you still have any "strict empty" guard, gate it so it never throws.
+  //     Keep it conservative; do not mutate JSON shape if not needed.
+  let finalInstruments = instruments;
+  if (!finalInstruments.length) {
+    // If Python delivered a suggested rescue list, use it; otherwise leave empty.
+    const rescue = safeArr(normalized.rescue || []);
+    if (rescue.length) {
+      log('mix-only rescue picked:', rescue.join(', '));
+      finalInstruments = rescue;
+    }
+  }
+
+  // Return a stable shape upward (so renderer/db writer can't crash)
+  return {
+    mode,
+    used_demucs,
+    instruments: finalInstruments,
+    by_stem,
+    decision_trace: decision,
+  };
+}
+
+const pyVenv = nodePath.join(__dirname, 'py', '.venv', 'bin', 'python');
+const scriptPath = nodePath.join(__dirname, 'instruments_ensemble.py');
+try {
+  const st = fs.statSync(scriptPath);
+  const head = (() => {
+    try {
+      const b = fs.readFileSync(scriptPath, {encoding: 'utf8'}).slice(0, 160).replace(/\n/g, ' ↵ ');
+      return b;
+    } catch { return '(head unreadable)'; }
+  })();
+  log('scriptPath:', scriptPath);
+  log('script mtime:', st.mtime?.toISOString?.() || String(st.mtime));
+  log('script head:', head);
+} catch (e) {
+  warn('cannot stat/read instruments_ensemble.py:', String(e && e.message));
+}
+const MusicTempo = require('music-tempo');
 const http = require('http');
 const mm = require('music-metadata');
 const { runAudioProbes } = require('./probes/index.js');
+
+// --- Tempo helpers ---
+function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+
+function roundBpm(n) { return (Number.isFinite(n) && n > 0) ? Math.round(n) : null; }
+
+async function bpmFromWindow(filePath, startSec, durSec) {
+  return new Promise((resolve) => {
+    const args = [
+      '-ss', String(startSec),
+      '-t', String(durSec),
+      '-i', filePath,
+      '-ac', '1',
+      '-ar', '44100',
+      '-f', 'f32le',
+      '-hide_banner', '-loglevel', 'error',
+      'pipe:1'
+    ];
+    const cp = spawn('ffmpeg', args);
+    const chunks = [];
+
+    cp.stdout.on('data', c => chunks.push(c));
+    cp.stderr.on('data', e => {
+      // helpful when windows fail
+      const msg = e.toString().trim();
+      if (msg) console.log('[FFMPEG]', msg);
+    });
+    cp.on('error', () => resolve(null));
+    cp.on('close', (code) => {
+      if (code !== 0) return resolve(null);
+      try {
+        const buf = Buffer.concat(chunks);
+        if (buf.length < 4) return resolve(null);
+
+        // music-tempo wants a numeric array
+        const f32 = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+        const mt = new MusicTempo(Array.from(f32)); // default constructor
+        resolve(roundBpm(mt.tempo));
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+function generateCandidates(raw) {
+  const r = Number(raw);
+  if (!Number.isFinite(r) || r <= 0) return [];
+  // explore equivalence around x0.5 / x1 / x2 / x1.5 / x(2/3)
+  const cands = [r, r/2, r*2, (3*r)/2, (2*r)/3]
+    .map(roundBpm)
+    .filter(b => b && b >= 50 && b <= 200);
+  return Array.from(new Set(cands));
+}
+
+function pickTempo(candidates, hasPerc) {
+  if (!candidates.length) return null;
+
+  const score = new Map();
+  for (const bpm of candidates) {
+    let s = 100;
+
+    // band preference
+    if (hasPerc) {
+      if (bpm >= 90 && bpm <= 180) s += 40;
+    } else {
+      if (bpm >= 60 && bpm <= 120) s += 40;
+    }
+
+    // gentle pull to common anchors
+    const anchors = [60, 75, 90, 100, 110, 120, 128, 140, 150, 160];
+    const nearest = anchors.reduce((a, b) => Math.abs(b - bpm) < Math.abs(a - bpm) ? b : a, anchors[0]);
+    s += Math.max(0, 20 - Math.abs(nearest - bpm)); // within ±20 → bonus
+
+    score.set(bpm, (score.get(bpm) || 0) + s);
+  }
+
+  const best = Math.max(...score.values());
+  const tied = [...score.entries()].filter(([,v]) => v === best).map(([k]) => k);
+  if (tied.length === 1) return tied[0];
+
+  // tie-break by closeness to median of candidates
+  const sorted = candidates.slice().sort((a,b)=>a-b);
+  const m = sorted.length % 2 ? sorted[(sorted.length-1)/2] : (sorted[sorted.length/2 - 1] + sorted[sorted.length/2]) / 2;
+  return tied.reduce((a,b)=> Math.abs(b - m) < Math.abs(a - m) ? b : a, tied[0]);
+}
+
+// Fold any tempo into a sane band so windows are comparable
+function foldToRange(bpm, lo = 70, hi = 180) {
+  let t = Number(bpm) || 0;
+  if (!Number.isFinite(t) || t <= 0) return NaN;
+  while (t < lo) t *= 2;
+  while (t > hi) t /= 2;
+  return t;
+}
+
+// Percussion-aware normalization for a single window
+function resolveTempoWindow(rawBpm, hasPerc) {
+  let t = foldToRange(rawBpm); // 70..180
+  if (!Number.isFinite(t)) return NaN;
+
+  // With drums: prefer double-time if folded tempo lands low (70-95)
+  if (hasPerc && t >= 70 && t <= 95) {
+    const dbl = t * 2;
+    if (dbl >= 100 && dbl <= 190) t = dbl;
+  }
+
+  // Without drums: prefer half-time if folded tempo lands high (135-170)
+  if (!hasPerc && t >= 135 && t <= 170) {
+    const half = t / 2;
+    if (half >= 68 && half <= 100) t = half;
+  }
+
+  // Keep t in reasonable band
+  if (t > 190) t = Math.round(t / 2);
+  return Math.round(t);
+}
+
+async function extractPcmWindow(filePath, startSec, durationSec) {
+  const args = [
+    '-ss', String(startSec),
+    '-t', String(durationSec),
+    '-i', filePath,
+    '-ac', '1',
+    '-ar', '44100',
+    '-f', 'f32le',
+    '-hide_banner', '-loglevel', 'error',
+    'pipe:1'
+  ];
+  return new Promise((resolve) => {
+    const chunks = [];
+    const cp = spawn('ffmpeg', args);
+    cp.stdout.on('data', (b) => chunks.push(b));
+    cp.stderr.on('data', () => {}); // quiet
+    cp.on('error', () => resolve(null));
+    cp.on('close', (code) => {
+      if (code !== 0) return resolve(null);
+      try {
+        const buf = Buffer.concat(chunks);
+        if (buf.length < 8) return resolve(null);
+        // Interpret as Float32 PCM
+        const f32 = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+        resolve(f32);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+async function tempoForWindow(filePath, startSec, durationSec) {
+  const pcm = await extractPcmWindow(filePath, startSec, durationSec);
+  if (!pcm || pcm.length < 128) return NaN;
+  // MusicTempo expects an audio-like envelope; this works fine for coarse BPM
+  const mt = new MusicTempo(Array.from(pcm));
+  const raw = Number(mt.tempo) || NaN;
+  return (Number.isFinite(raw) && raw > 0) ? raw : NaN;
+}
+
+// Parse ID3 TBPM safely. Returns an integer BPM (1..399) or null if absent/invalid.
+function parseId3BpmSafe(id3Tags) {
+  const v = id3Tags?.bpm;
+  if (v === undefined || v === null) return null;
+  if (typeof v === 'number') {
+    const n = Number(v);
+    return (Number.isFinite(n) && n > 0 && n < 400) ? Math.round(n) : null;
+  }
+  if (typeof v === 'string') {
+    // Accept strings like "148", "148.2", even "148 bpm"
+    const m = v.match(/([0-9]+(?:\.[0-9]+)?)/);
+    if (!m) return null;
+    const n = Number(m[1]);
+    return (Number.isFinite(n) && n > 0 && n < 400) ? Math.round(n) : null;
+  }
+  return null;
+}
+
+// Mutates `analysis` to persist BPM fields and returns a CSV-friendly BPM difference string.
+// Safe to call only AFTER `analysis` has been created.
+function applyBpmToAnalysis(analysis, finalBpm, id3Tags) {
+  if (!analysis) return '';
+  if (finalBpm == null || !Number.isFinite(finalBpm)) {
+    analysis.estimated_tempo_bpm = null;
+    analysis.tempo_bpm = null;
+    analysis.bpm = null; // legacy field for downstream writers/logs
+    return '';
+  }
+  const est = Math.round(Number(finalBpm));
+  analysis.estimated_tempo_bpm = est;
+  analysis.tempo_bpm = est; // keep both names in sync for callers expecting either
+  analysis.bpm = est;       // legacy field used by some JSON writers/logs
+  const id3Parsed = parseId3BpmSafe(id3Tags);
+  if (id3Parsed != null) return Math.abs(id3Parsed - est);
+  return '';
+}
+
+// --- Fallback: onset/ACF tempo estimator (high-res, no 2/3 folding) ---
+// Uses a longer center window and autocorrelation of a simple onset envelope.
+// Returns an integer BPM in [50, 200] or null if it cannot estimate.
+async function estimateTempoACF(filePath, durationSec, hints = {}) {
+  __acfConfidence = null; // reset per call
+  const dur = Number(durationSec) || 0;
+  const win = Math.min(60, Math.max(20, Math.floor(dur * 0.4))); // 20–60s or ~40% of track
+  const start = (dur > win + 10) ? Math.max(0, Math.floor((dur - win) / 2) - 5) : 0;
+  const pcm = await extractPcmWindow(filePath, start, win);
+  if (!pcm || pcm.length < 2048) return null;
+
+  // ↑ Increase resolution so raw lands closer to the true pulse (e.g., 147–148).
+  const DS = 2;                 // was 4 (now ~22.05 kHz)
+  const frame = 1024, hop = 256; // was 512 (2× finer hop)
+  const SR = 44100 / DS;
+
+  // Downsample (keep it simple and deterministic)
+  const dsLen = Math.floor(pcm.length / DS);
+  const ds = new Float32Array(dsLen);
+  for (let i = 0, j = 0; j < dsLen; i += DS, j++) ds[j] = pcm[i];
+
+  // Simple onset envelope: rectified frame-energy differences
+  const nFrames = Math.floor((ds.length - frame) / hop);
+  if (nFrames < 10) return null;
+  const flux = new Float32Array(nFrames);
+  let prevE = 0;
+  for (let i = 0; i < nFrames; i++) {
+    const off = i * hop;
+    let e = 0;
+    for (let k = 0; k < frame; k++) e += Math.abs(ds[off + k]);
+    const d = e - prevE;
+    flux[i] = d > 0 ? d : 0;
+    prevE = e;
+  }
+  // Normalize envelope
+  let max = 0;
+  for (let i = 0; i < flux.length; i++) if (flux[i] > max) max = flux[i];
+  if (max > 0) for (let i = 0; i < flux.length; i++) flux[i] /= max;
+
+  // Autocorrelation across 50–200 BPM
+  const fps = SR / hop;
+  const minBpm = 50, maxBpm = 200;
+  const minLag = Math.floor(fps * 60 / maxBpm);
+  const maxLag = Math.floor(fps * 60 / minBpm);
+  let bestLag = 0, bestScore = 0, secondScore = 0;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let s = 0;
+    for (let i = 0; i + lag < flux.length; i++) s += flux[i] * flux[i + lag];
+    if (s > bestScore) { secondScore = bestScore; bestScore = s; bestLag = lag; }
+    else if (s > secondScore) { secondScore = s; }
+  }
+  if (!bestLag) return null;
+  const bpmRaw = 60 * fps / bestLag;
+  // confidence in [0..1]: peak prominence via best/(best+second)
+  if (bestScore > 0) {
+    __acfConfidence = Math.max(0, Math.min(1, bestScore / (bestScore + (secondScore || 0))));
+  }
+
+  // Only allow {raw, half, double}. NO 2/3 or 3/2 folding in fallback.
+  const cand = [bpmRaw, bpmRaw * 0.5, bpmRaw * 2]
+    .map(v => Math.max(minBpm, Math.min(maxBpm, v)));
+  // pick the candidate closest to raw
+  let best = cand[0], bestDiff = Math.abs(cand[0] - bpmRaw);
+  for (let i = 1; i < cand.length; i++) {
+    const d = Math.abs(cand[i] - bpmRaw);
+    if (d < bestDiff) { best = cand[i]; bestDiff = d; }
+  }
+
+  // Light rock bias: if guitars/brass present and chosen BPM < 110 while raw ≥ 120, snap to raw.
+  const rockBias = !!(hints.guitar || hints['electric guitar'] || hints.brass);
+  if (best < 110 && bpmRaw >= 120 && rockBias) {
+    const snapped = Math.round(bpmRaw);
+    console.log(`[TEMPO-ACF] Rock-bias snap ${best.toFixed(0)} → ${snapped} (raw ${bpmRaw.toFixed(1)})`);
+    return snapped;
+  }
+  const out = Math.round(best);
+  const c = (__acfConfidence == null) ? '' : `, conf ${__acfConfidence.toFixed(2)}`;
+  console.log(`[TEMPO-ACF] Fallback BPM: ${out} (raw ${bpmRaw.toFixed(1)}${c})`);
+  return out;
+}
+async function estimateTempoThirds(filePath, durationSec, hints = {}) {
+  const dur = Number(durationSec) || 0;
+  if (dur <= 8) return null;
+  // constant used only for logging; extractPcmWindow uses -ar 44100
+  const __SR = 44100;
+
+  const third = dur / 3;
+  const win = clamp(third * 0.25, 8, 30);
+  const midOff = (third - win) / 2;
+
+  const windows = [0,1,2].map(i => {
+    const start = clamp(i * third + midOff, 0, Math.max(0, dur - win));
+    return { start, win };
+  });
+
+  let best = null;
+  for (let i = 0; i < 3; i++) {
+    let thisWin = win;
+    let s;
+    if (i === 0) {
+      s = 0;
+    } else if (i === 1) {
+      s = Math.max(0, Math.floor((dur - thisWin) / 2));
+    } else {
+      s = Math.max(0, Math.floor(dur - thisWin));
+    }
+    let pcm = await extractPcmWindow(filePath, s, thisWin);
+
+    // Log raw sample count and approx seconds for each window
+    const secs = pcm ? (pcm.length / __SR) : 0;
+    tempoDbg(`[TEMPO-THIRDS] w${i + 1} start=${s}s dur=${thisWin}s samples=${pcm ? pcm.length : 0} (~${secs.toFixed(2)}s)`);
+
+    // If we got a starved window, try a single widen attempt (×1.5 up to 60s)
+    if (!pcm || pcm.length < (__SR * 6)) {
+      const widened = Math.min(60, Math.floor(thisWin * 1.5));
+      if (widened > thisWin) {
+        tempoDbg(`[TEMPO-THIRDS] w${i + 1} starving → widen ${thisWin}s → ${widened}s and retry`);
+        thisWin = widened;
+        if (i === 1) s = Math.max(0, Math.floor((dur - thisWin) / 2));
+        if (i === 2) s = Math.max(0, Math.floor(dur - thisWin));
+        pcm = await extractPcmWindow(filePath, s, thisWin);
+        const secs2 = pcm ? (pcm.length / __SR) : 0;
+        tempoDbg(`[TEMPO-THIRDS] w${i + 1} retry samples=${pcm ? pcm.length : 0} (~${secs2.toFixed(2)}s)`);
+      }
+    }
+    if (!pcm || pcm.length < 2048) {
+      tempoDbg(`[TEMPO-THIRDS] w${i + 1} empty/too-small after retry, skipping`);
+      continue;
+    }
+
+    // window-level BPM
+    const bpm = await bpmFromWindow(filePath, s, thisWin);
+    if (Number.isFinite(bpm) && bpm > 0) {
+      if (!best) best = bpm;
+      else best = (best + bpm) / 2; // simple average
+      tempoDbg(`[TEMPO-THIRDS] w${i + 1} bpm=${Math.round(bpm)} merged=${Math.round(best)}`);
+    } else {
+      tempoDbg(`[TEMPO-THIRDS] w${i + 1} failed to produce bpm`);
+    }
+  }
+
+  return best ?? null;
+}
+
+
+// --- helpers (place once) ---
+const pickMax = (arr) => arr.length ? Math.max(...arr) : 0;
+
+// Family maps to catch synonyms/sections from CLAP labels
+const FAMILY = {
+  brass:   ['brass', 'trumpet', 'trombone', 'horn', 'french horn', 'tuba'],
+  strings: ['strings', 'string section', 'violin', 'viola', 'cello', 'double bass'],
+  drums:   ['drums', 'drumkit', 'snare', 'snare drum', 'tom-tom', 'tom', 'hi-hat', 'kick drum'],
+  cymbals: ['cymbal', 'ride cymbal', 'crash cymbal', 'splash cymbal'],
+  timpani: ['timpani', 'kettle drum'],
+};
+
+function setIf(scores, keys, threshold) {
+  return keys.some(k => (scores[k] || 0) >= threshold);
+}
+
+// ---------- Instrument mapping & thresholds ----------
+const INSTR_ALIASES = new Map([
+  // Percussion family & subtypes
+  ['drum kit', 'drumkit'], ['drums', 'drumkit'], ['snare drum', 'snare'],
+  ['snare', 'snare'], ['cymbal', 'cymbals'], ['cymbals', 'cymbals'],
+  ['timpani', 'timpani'], ['orchestral drums', 'timpani'],
+
+  // Brass
+  ['brass instrument', 'brass'], ['brass', 'brass'],
+  ['trumpet', 'brass'], ['trombone', 'brass'], ['horn', 'brass'], ['french horn', 'brass'],
+
+  // Strings
+  ['strings', 'strings'], ['string section', 'strings'],
+  ['violin', 'strings'], ['viola', 'strings'], ['cello', 'strings'],
+  ['orchestra', 'strings'],
+
+  // Keyboards / guitars / etc.
+  ['piano', 'piano'], ['grand piano', 'piano'], ['keyboard', 'keyboard'], ['electric piano', 'keyboard'],
+  ['guitar', 'guitar'], ['electric guitar', 'guitar'], ['acoustic guitar', 'guitar'],
+  ['bass', 'bass'], ['double bass', 'bass'],
+  ['organ', 'organ'], ['synth', 'synth'], ['synth pad', 'synth'],
+  ['vocals', 'vocals'], ['voice', 'vocals'], ['singing', 'vocals']
+]);
+
+const PERC_SUBTYPES = new Set(['snare', 'cymbals', 'timpani']);
+const CLAP_THRESH = { generic: 0.08, perc: 0.06, vocals: 0.13, strong: 0.12 };
+
+// Utility: normalize arbitrary model label to our canonical instrument bucket
+function normalizeInstrumentLabel(label) {
+  if (!label) return null;
+  const s = String(label).toLowerCase().trim();
+  if (INSTR_ALIASES.has(s)) return INSTR_ALIASES.get(s);
+  // loose contains: map "string section", "french horn", etc.
+  for (const [k, v] of INSTR_ALIASES.entries()) {
+    if (s.includes(k)) return v;
+  }
+  return null;
+}
+
+// ---- Aggregate CLAP/AST into stable instrument hints ----
+function aggregateInstrumentsPerTrack(windows) {
+  // windows = [{ clapTop: [{label, score}, ...], astLabels: ['Trumpet','...'] }, ...]
+  const voteCount = new Map();     // canonical -> count across windows
+  const maxScore  = new Map();     // canonical -> max CLAP score
+  const details   = new Set();     // subtypes like snare/cymbals/timpani (if seen anywhere)
+
+  for (const w of windows) {
+    const seenThisWindow = new Set();
+
+    // 1) CLAP top-K voting
+    for (const it of (w.clapTop || [])) {
+      const canon = normalizeInstrumentLabel(it.label);
+      if (!canon) continue;
+      // collect max score
+      maxScore.set(canon, Math.max(maxScore.get(canon) || 0, it.score || 0));
+      // per-window single vote per canon
+      if (!seenThisWindow.has(canon)) {
+        voteCount.set(canon, (voteCount.get(canon) || 0) + 1);
+        seenThisWindow.add(canon);
+      }
+      if (PERC_SUBTYPES.has(canon)) details.add(canon);
+    }
+
+    // 2) AST label fallback (keyword contains), low weight → only for details & weak vote
+    for (const lbl of (w.astLabels || [])) {
+      const canon = normalizeInstrumentLabel(lbl);
+      if (!canon) continue;
+      // give a weak vote only if we have zero votes so far for this canon
+      if (!seenThisWindow.has(canon) && !voteCount.has(canon)) {
+        voteCount.set(canon, 1); // single weak vote in the whole track unless CLAP already voted
+      }
+      if (PERC_SUBTYPES.has(canon)) details.add(canon);
+    }
+  }
+
+  // 3) Decide presence using thresholds + majority
+  const hints = {
+    piano: false, guitar: false, bass: false, organ: false, synth: false, keyboard: false,
+    brass: false, strings: false, drumkit: false, percussion: false, vocals: false
+  };
+
+  const windowsN = Math.max(1, windows.length);
+  const present = (canon, minVotes, minScore) =>
+    (voteCount.get(canon) || 0) >= minVotes || (maxScore.get(canon) || 0) >= minScore;
+
+  // Pitched families
+  hints.piano    = present('piano',   2, CLAP_THRESH.generic);
+  hints.guitar   = present('guitar',  2, CLAP_THRESH.generic);
+  hints.bass     = present('bass',    2, CLAP_THRESH.generic);
+  hints.organ    = present('organ',   2, CLAP_THRESH.generic);
+  hints.synth    = present('synth',   2, CLAP_THRESH.generic) || present('keyboard', 2, CLAP_THRESH.generic);
+  hints.keyboard = present('keyboard',2, CLAP_THRESH.generic);
+
+  // Orchestral families
+  hints.brass    = present('brass',   2, CLAP_THRESH.generic);
+  hints.strings  = present('strings', 2, CLAP_THRESH.generic);
+
+  // Percussion families (more forgiving; short transients)
+  const percHit  = present('snare', 1, CLAP_THRESH.perc) || present('cymbals', 1, CLAP_THRESH.perc) || present('timpani', 1, CLAP_THRESH.perc);
+  hints.percussion = percHit;
+  // Drumkit = needs stronger evidence (either majority or strong score)
+  hints.drumkit    = present('drumkit', Math.ceil(windowsN * 0.66), CLAP_THRESH.strong);
+
+  // Vocals – be strict (avoid false positives on orchestral cues)
+  hints.vocals  = present('vocals', Math.ceil(windowsN * 0.66), CLAP_THRESH.vocals);
+
+  return { hints, details: Array.from(details) };
+}
+
+
+
 
 function run(bin, args, { collect = 'stdout' } = {}) {
   return new Promise((resolve, reject) => {
@@ -41,203 +971,16 @@ async function ffprobeJson(filePath) {
   };
 }
 
-// BPM normalizer - prefer 70–180 and bias toward 120 BPM
-function normalizeBpm(raw) {
-  const r = Number(raw);
-  if (!Number.isFinite(r) || r <= 0) return raw;
-  const candidates = [r, r * 0.5, r * 2];
-  const scores = candidates.map(bpm => {
-    const inRangeBonus = (bpm >= 70 && bpm <= 180) ? 100 : 0;
-    const proximityPenalty = Math.abs(bpm - 120);
-    return inRangeBonus - proximityPenalty;
-  });
-  const best = candidates[scores.indexOf(Math.max(...scores))];
-  return Math.round(best);
-}
 
 // loudness calculation removed for performance
 
-async function estimateTempo(filePath) {
-  try {
-    // Get file duration to choose appropriate analysis window
-    const meta = await ffprobeJson(filePath);
-    const dur = Number(meta?.duration_sec ?? 0) || 0;
-    
-    let start = 0, len = 0;
-    if (dur >= 32) {
-      // Long tracks: use stable middle section
-      start = 20; 
-      len = 30;
-    } else if (dur >= 12) {
-      // Medium tracks: centered window, 80% of duration (max 30s)
-      len = Math.min(30, Math.max(8, Math.floor(dur * 0.8)));
-      start = Math.max(0, Math.floor((dur - len) / 2));
-    } else if (dur >= 6) {
-      // Short tracks: analyze entire track
-      start = 0; 
-      len = Math.floor(dur);
-    } else {
-      // Too short for reliable BPM
-      console.log('[TEMPO] Track too short for BPM analysis:', dur, 'seconds');
-      return null;
-    }
-    
-    console.log(`[TEMPO] Analyzing window: ${start}s-${start+len}s of ${dur.toFixed(1)}s track`);
-    
-    // Extract mono PCM for the chosen window
-    const args = [
-      '-hide_banner', '-nostats',
-      '-ss', String(start),
-      '-t', String(len),
-      '-i', filePath,
-      '-vn', '-ac', '1', '-ar', '11025',
-      '-f', 's16le', '-'
-    ];
-    
-    const cp = spawn('ffmpeg', args);
-    const chunks = [];
-    
-    return new Promise((resolve) => {
-      cp.stdout.on('data', chunk => chunks.push(chunk));
-      cp.on('close', (code) => {
-        if (code !== 0) {
-          console.log('[TEMPO] FFmpeg extraction failed');
-          resolve(null);
-          return;
-        }
-        const buffer = Buffer.concat(chunks);
-        if (!buffer.length) {
-          console.log('[TEMPO] No audio data extracted');
-          resolve(null);
-          return;
-        }
-        const samples = new Int16Array(buffer.buffer, buffer.byteOffset, buffer.length / 2);
-        
-        // Convert to float32
-        const float32 = new Float32Array(samples.length);
-        for (let i = 0; i < samples.length; i++) {
-          float32[i] = samples[i] / 32768;
-        }
-        
-        // Onset envelope (energy flux)
-        const frameSize = 512;
-        const hopSize = 256;
-        const envelope = [];
-        let prevEnergy = 0;
-        for (let i = 0; i < float32.length - frameSize; i += hopSize) {
-          let energy = 0;
-          for (let j = 0; j < frameSize; j++) {
-            const v = float32[i + j];
-            energy += v * v;
-          }
-          const flux = Math.max(0, energy - prevEnergy);
-          envelope.push(flux);
-          prevEnergy = energy;
-        }
-        if (envelope.length < 4) {
-          console.log('[TEMPO] Envelope too short');
-          resolve(null);
-          return;
-        }
-        
-        // Autocorrelation across candidate BPM ranges
-        const autocorr = new Array(envelope.length).fill(0);
-        for (let lag = 1; lag < envelope.length - 1; lag++) {
-          let sum = 0;
-          for (let i = 0; i < envelope.length - lag; i++) {
-            sum += envelope[i] * envelope[i + lag];
-          }
-          autocorr[lag] = sum / (envelope.length - lag);
-        }
-        
-        // Candidate BPM bands
-        const bpmRanges = [
-          { min: 80,  max: 120 }, // Medium
-          { min: 120, max: 160 }, // Fast
-          { min: 160, max: 200 }  // Very fast
-        ];
-        
-        const sampleRate = 11025;
-        const hopRate = sampleRate / hopSize;
-        
-        let bestBpm = null;
-        let bestScore = -Infinity;
-        for (const range of bpmRanges) {
-          const minLag = Math.floor(hopRate * 60 / range.max);
-          const maxLag = Math.floor(hopRate * 60 / range.min);
-          for (let lag = minLag; lag <= maxLag && lag < autocorr.length; lag++) {
-            const bpm = 60 * hopRate / lag;
-            const score = autocorr[lag];
-            // Light preference for common range
-            const commonBonus = (bpm >= 80 && bpm <= 160) ? 1.1 : 1.0;
-            const adjustedScore = score * commonBonus;
-            if (adjustedScore > bestScore) {
-              bestScore = adjustedScore;
-              bestBpm = bpm;
-            }
-          }
-        }
-        
-        // Resolve half/double-time by grid alignment on the envelope
-        function resolveOctave(envelope, hopRate, bpm) {
-          if (!bpm || !Number.isFinite(bpm)) return null;
-          // Generate candidates within [80,200]
-          const raw = [bpm / 2, bpm, bpm * 2]
-            .filter(x => x >= 80 && x <= 200);
-          // De-duplicate rounded candidates
-          const seen = new Set(); 
-          const candidates = [];
-          for (const x of raw) {
-            const r = Math.round(x);
-            if (!seen.has(r)) { 
-              seen.add(r); 
-              candidates.push(x); 
-            }
-          }
-          let best = bpm, bestSum = -Infinity;
-          for (const cand of candidates) {
-            const interval = hopRate * (60 / cand); // frames between beats
-            if (!Number.isFinite(interval) || interval < 2) continue;
-            const beatsToCheck = Math.min(32, Math.floor(envelope.length / interval));
-            let localBest = -Infinity;
-            // Try a few phase offsets across one interval (8 steps)
-            for (let phaseStep = 0; phaseStep < 8; phaseStep++) {
-              const phase = (interval * phaseStep) / 8;
-              let sum = 0;
-              for (let k = 0; k < beatsToCheck; k++) {
-                const idx = Math.round(phase + k * interval);
-                if (idx >= 0 && idx < envelope.length) sum += envelope[idx];
-              }
-              if (sum > localBest) localBest = sum;
-            }
-            // Slight preference for 140–170 where many rock tracks sit
-            const preference = (cand >= 140 && cand <= 170) ? 1.05 : 1.0;
-            const score = localBest * preference;
-            if (score > bestSum) { 
-              bestSum = score; 
-              best = cand; 
-            }
-          }
-          return best;
-        }
-        
-        const resolved = resolveOctave(envelope, hopRate, bestBpm) ?? bestBpm ?? 120;
-        const rounded = normalizeBpm(resolved);
-        console.log(`[TEMPO] Window ${start}-${start+len}s, Raw BPM: ${bestBpm?.toFixed(1)}, Resolved: ${resolved?.toFixed(1)}, Final: ${rounded}`);
-        resolve(rounded);
-      });
-      cp.on('error', () => resolve(null));
-    });
-  } catch (e) {
-    console.error('[TEMPO] estimateTempo failed:', e);
-    return null;
-  }
-}
+
+
 
 async function checkWavExists(mp3Path) {
   const wavPath = mp3Path.replace(/\.mp3$/i, '.wav');
   try {
-    await fs.access(wavPath);
+    await fsp.access(wavPath);
     return true;
   } catch {
     return false;
@@ -275,18 +1018,46 @@ async function checkOllamaModel(model) {
 }
 
 // Full creative analysis with Envato taxonomy
-async function runCreativeAnalysis(baseName, bpm, model = 'qwen3:8b', audioHints = null) {
+async function runCreativeAnalysis(baseName, bpm, model = 'qwen3:8b', audioHints = null, dbFolder = null) {
   console.log('[CREATIVE] Running full creative analysis...');
+  console.log('[CREATIVE:LIFECYCLE] START');
+  
+  // NEW: immediately notify UI that Creative has started for this file
+  // Mirrors the TECH/INSTR start signals so badges/spinners light up.
+  try {
+    safeSend('jobProgress', {
+      trackId: baseName,           // renderer maps by trackId elsewhere; we mirror TECH
+      stage: 'creative',
+      status: 'PROCESSING',
+      percent: 0,
+      note: 'Starting creative analysis...'
+    });
+    // Some UIs listen on a stage-specific channel; emit a redundant signal for those.
+    safeSend('creative:progress', {
+      trackId: baseName,
+      status: 'PROCESSING',
+      percent: 0,
+      note: 'Starting creative analysis...'
+    });
+  } catch (_) {
+    // best-effort UI hint; do not break pipeline if send fails
+  }
+  
+  // v1.3.2: Structured result variables
+  let rawResponse = null;
+  let creativeJson = null;
   
   // Check if model is installed
   const modelInstalled = await checkOllamaModel(model);
   if (!modelInstalled) {
     console.log(`[CREATIVE] Model '${model}' not installed. Please run: ollama pull ${model}`);
     return { 
+      ok: false,
+      rawPath: null,
+      json: getDefaultCreative(),
       error: true, 
       offline: false,
-      modelMissing: true,
-      data: getDefaultCreative() 
+      modelMissing: true
     };
   }
   
@@ -561,7 +1332,7 @@ async function runCreativeAnalysis(baseName, bpm, model = 'qwen3:8b', audioHints
   };
 
   // Build comprehensive prompt with expanded taxonomy
-  const systemPrompt = `You are an expert music analyst. Analyze the track based on its metadata and categorize it using ONLY these specific values:
+  const systemPrompt = `You are a JSON API. Output ONLY valid JSON, no prose, no code fences. You are an expert music analyst. Analyze the track based on its metadata and categorize it using ONLY these specific values:
 
 MOOD options: ${ENVATO_TAXONOMY.mood.join(', ')}
 GENRE options: ${ENVATO_TAXONOMY.genre.join(', ')}
@@ -593,7 +1364,7 @@ CRITICAL:
  - Include lyricThemes ONLY if vocals are NOT "No Vocals", otherwise use empty array
  - confidence must be a decimal number from 0.0 to 1.0 (do NOT use percentages like "85%")
  - Never leave vocals array empty
-Return ONLY valid JSON, no other text.`;
+Return ONLY valid JSON, no other text. Do not include comments or trailing commas.`;
 
   const userPrompt = `Analyze this track:
 Title: "${baseName}"
@@ -605,25 +1376,42 @@ Please include these in your analysis where appropriate.
 ` : ''}
 Based on the title and technical characteristics, provide your creative analysis. Be thorough in identifying instruments.`;
 
-  // Use the model passed from settings, with lower temperature for advanced models
-  const isAdvancedModel = model.includes('qwen2.5') || model.includes('gemma2') || model.includes('mixtral');
-  const temperature = isAdvancedModel ? 0.3 : 0.7;
+  // v1.3.0: Apple Silicon (M4 Pro, 64GB) tuned options for optimal performance
+  const defaultOllamaOptions = {
+    temperature: 0.6,
+    top_p: 0.9,
+    top_k: 50,
+    num_batch: 128,
+    num_thread: 8
+  };
   
-  const payload = JSON.stringify({
+  // Merge with any user-specified overrides from audioHints
+  const mergedOptions = { ...defaultOllamaOptions, ...(audioHints?.ollamaOptions || {}) };
+  
+  // Guardrail to force JSON-only output
+  const jsonOnlyGuard = "\n\nReturn ONLY a single valid JSON object. Do not include any prose, code fences, or explanations.";
+  
+  // Build the complete request prompt with guard
+  const requestPrompt = userPrompt + jsonOnlyGuard;
+  
+  console.log("[OLLAMA-ACCEL] Final merged options:", JSON.stringify(mergedOptions));
+  
+  const body = {
     model: model,
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
+      { role: 'user', content: requestPrompt }
     ],
     stream: false,
     format: 'json',
-    options: { 
-      temperature: temperature,
-      top_p: 0.9
-    }
-  });
+    options: mergedOptions
+  };
   
-  console.log(`[CREATIVE] Using model: ${model} (temp: ${temperature})`);
+  console.log("[CREATIVE-REQ]", { model: body.model, format: body.format, stream: body.stream });
+  
+  const payload = JSON.stringify(body);
+  
+  console.log(`[CREATIVE] Using model: ${model} (temp: ${mergedOptions.temperature})`);
 
   return new Promise((resolve) => {
     const req = http.request({
@@ -635,10 +1423,10 @@ Based on the title and technical characteristics, provide your creative analysis
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload)
       }
-    }, (res) => {
+    }, async (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
+      res.on('end', async () => {
         try {
           // Log raw response for debugging (small payloads)
           if (data.length < 500) {
@@ -654,18 +1442,56 @@ Based on the title and technical characteristics, provide your creative analysis
           // Check for error in response
           if (parsed.error) {
             console.log('[CREATIVE] Ollama error:', parsed.error);
-            resolve({ error: true, data: getDefaultCreative() });
+            resolve({ 
+              ok: false,
+              rawPath: null,
+              json: getDefaultCreative(),
+              error: true 
+            });
             return;
           }
           
           if (!content) {
             console.log('[CREATIVE] No content in response. Response keys:', Object.keys(parsed));
-            resolve({ error: true, data: getDefaultCreative() });
+            resolve({ 
+              ok: false,
+              rawPath: null,
+              json: getDefaultCreative(),
+              error: true 
+            });
             return;
           }
           
-          // Parse the JSON response
-          const creative = JSON.parse(content);
+          // v1.4.1: Assign raw response and parse once with DB-scoped logging
+          rawResponse = String(content);
+          console.log('[CREATIVE:LIFECYCLE] INFERENCE DONE');
+          
+          // Compute the DB-scoped Logs dir once per call
+          const logsDir = getDbLogsDir(dbFolder);
+          
+          // Build filenames and write to DB-scoped logs
+          const slug = slugifyBase(baseName);
+          const ts = new Date().toISOString().replace(/[:.]/g, '-');
+          
+          const rawOutName = `creative-raw-${slug}-${ts}.txt`;
+          const parsedOutName = `creative-json-${slug}-${ts}.json`;
+          
+          // Write RAW to disk via the strict writer
+          const rawPath = await writeLogFileStrict(logsDir, rawOutName, rawResponse);
+          
+          try {
+            creativeJson = sanitizeAndParseJson(rawResponse);
+            const parsedPath = await writeLogFileStrict(logsDir, parsedOutName, JSON.stringify(creativeJson, null, 2));
+            console.log('[CREATIVE-JSON] Parsed OK:', parsedPath);
+          } catch (e) {
+            console.warn('[CREATIVE-JSON-ERROR]', e?.message || e, '— RAW at:', rawPath);
+            creativeJson = null; // IMPORTANT: explicit null signals failure to callers
+          }
+          console.log('[CREATIVE:LIFECYCLE] LOGS WRITTEN');
+          
+          // We already have a sanitized object. Use it directly; don't re-parse.
+          // If sanitize failed, fall back to defaults.
+          const creative = creativeJson ? creativeJson : getDefaultCreative();
           
           // Enhanced vocal validation with synonym mapping
           function normalizeVocals(list = []) {
@@ -711,30 +1537,65 @@ Based on the title and technical characteristics, provide your creative analysis
           const normalizedVocals = normalizeVocals(creative.vocals);
           const hasVocals = !normalizedVocals.includes("No Vocals");
           const MAX_INSTRUMENTS = 8;
-          const rawInstruments = normalizeInstruments(creative.instrument || []);
+          const rawInstruments = normalizeInstruments(creative.suggestedInstruments || []);
           const validated = {
             mood: (creative.mood || []).filter(m => ENVATO_TAXONOMY.mood.includes(m)),
             genre: (creative.genre || []).filter(g => ENVATO_TAXONOMY.genre.includes(g)),
             theme: (creative.theme || []).filter(t => ENVATO_TAXONOMY.theme.includes(t)),
-            instrument: rawInstruments.slice(0, MAX_INSTRUMENTS), // cap count
+            suggestedInstruments: rawInstruments.slice(0, MAX_INSTRUMENTS), // cap count
             vocals: normalizedVocals, // Enhanced vocal normalization
             lyricThemes: hasVocals ? (creative.lyricThemes || []).filter(t => ENVATO_TAXONOMY.lyricThemes.includes(t)) : [],
             narrative: String(creative.narrative || 'No description available').slice(0, 200),
             confidence: Math.min(1, Math.max(0, parseConfidence(creative.confidence)))
           };
           
-          console.log(`[CREATIVE] Analysis complete - Genre: ${validated.genre.join(', ')}, Mood: ${validated.mood.join(', ')}, Instruments: ${validated.instrument.slice(0, 5).join(', ')}${validated.instrument.length > 5 ? '...' : ''}`);
-          resolve({ error: false, data: validated });
+          console.log(`[CREATIVE] Analysis complete - Genre: ${validated.genre.join(', ')}, Mood: ${validated.mood.join(', ')}, Instruments: ${validated.suggestedInstruments.slice(0, 5).join(', ')}${validated.suggestedInstruments.length > 5 ? '...' : ''}`);
+          
+          // v1.4.1: Return structured result (single source of truth)
+          const result = {
+            ok: !!creativeJson,
+            rawPath: rawPath,
+            json: creativeJson || { genre: [], mood: [], instruments: [] }
+          };
+          console.log('[CREATIVE:LIFECYCLE] COMPLETE', { ok: result.ok });
+          
+          // On success, we already notify via jobProgress COMPLETE later in the orchestrator.
+          // Also send a stage-specific completion for UIs that listen to per-stage channel.
+          try {
+            safeSend('jobProgress', {
+              trackId: baseName,
+              stage: 'creative',
+              status: 'COMPLETE',
+            });
+            safeSend('creative:progress', {
+              trackId: baseName,
+              status: 'COMPLETE',
+              percent: 100,
+              note: 'Creative analysis complete'
+            });
+          } catch (_) {}
+          
+          resolve(result);
           
         } catch (e) {
           console.log('[CREATIVE] Failed to parse response:', e.message);
-          resolve({ error: true, data: getDefaultCreative() });
+          resolve({ 
+            ok: false,
+            rawPath,                 // absolute path to RAW file (for diagnostics)
+            json: getDefaultCreative()
+          });
         }
       });
     });
     req.on('error', (e) => {
       console.log(`[CREATIVE] Ollama connection failed: ${e.message}`);
-      resolve({ error: true, offline: true, data: getDefaultCreative() });
+      resolve({ 
+        ok: false,
+        rawPath: null,
+        json: getDefaultCreative(),
+        error: true, 
+        offline: true 
+      });
     });
     req.write(payload);
     req.end();
@@ -746,7 +1607,7 @@ function getDefaultCreative() {
     mood: [],
     genre: [],
     theme: [],
-    instrument: [],
+    suggestedInstruments: [],
     vocals: [],
     lyricThemes: [],
     narrative: 'Creative analysis unavailable',
@@ -754,8 +1615,8 @@ function getDefaultCreative() {
   };
 }
 
-async function analyzeMp3(filePath, win = null, model = 'qwen3:8b', dbFolder = null) {
-  const baseName = path.basename(filePath, path.extname(filePath));
+async function analyzeMp3(filePath, win = null, model = 'qwen3:8b', dbFolder = null, options = {}) {
+  const baseName = nodePath.basename(filePath, nodePath.extname(filePath));
   // Send technical starting event
   if (win) {
     win.webContents.send('jobProgress', {
@@ -765,11 +1626,44 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b', dbFolder = n
       note: 'Running technical analysis...'
     });
   }
-  const [probe, hasWav, tempo] = await Promise.all([
+  // First get probe and check WAV
+  const [probe, hasWav] = await Promise.all([
     ffprobeJson(filePath),
-    checkWavExists(filePath),
-    estimateTempo(filePath)
+    checkWavExists(filePath)
   ]);
+  
+  // Run audio probes first (need it for tempo resolution)
+  let probes = { status: 'skipped', hints: {} };
+  try {
+    const durationSec = probe?.duration_sec || 0;
+    if (durationSec > 5) {
+      console.log('[AUDIO_PROBE] Starting analysis for', baseName);
+      probes = await runAudioProbes(filePath, durationSec, baseName);
+      console.log('[AUDIO_PROBE] Hints merged:', probes.hints);
+      if (probes.status === 'ok' && probes.hints) {
+        const detected = Object.entries(probes.hints)
+          .filter(([k, v]) => v)
+          .map(([k]) => k)
+          .join(', ');
+        console.log('[AUDIO_PROBE] Detected:', detected);
+      }
+    }
+  } catch (e) {
+    console.log('[AUDIO_PROBE] Error:', e.message);
+  }
+  
+  // ... after you have `probe` and `probes` (with probes.hints), and before writing files:
+
+  const durSec = probe?.duration_sec || probe?.duration || 0;
+  let tempoSource = 'thirds';
+  let finalBpm = await estimateTempoThirds(filePath, durSec, probes?.hints || {});
+  if (finalBpm == null) {
+    console.log('[BPM-FINAL] thirds failed → trying ACF fallback');
+    finalBpm = await estimateTempoACF(filePath, durSec, probes?.hints || {});
+    tempoSource = 'acf_fallback';
+  }
+  console.log(`[BPM-FINAL] ${baseName}: ${finalBpm ?? 'NULL'}`);
+
   
   // Extract ID3 tags
   let id3Tags = {};
@@ -805,29 +1699,8 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b', dbFolder = n
   } catch (e) {
     console.log('[ID3] Failed to extract tags:', e.message);
   }
+
   
-  // Run audio probes - THIS WAS MISSING!
-  let probes = { status: 'skipped', hints: {} };
-  try {
-    const durationSec = probe?.duration_sec || 0;
-    if (durationSec > 5) {
-      console.log('[AUDIO_PROBE] Starting analysis for', baseName);
-      probes = await runAudioProbes(filePath, durationSec, baseName);
-      console.log('[AUDIO_PROBE] Hints merged:', probes.hints);
-      if (probes.status === 'ok' && probes.hints) {
-        const detected = Object.entries(probes.hints)
-          .filter(([k, v]) => v)
-          .map(([k]) => k)
-          .join(', ');
-        console.log('[AUDIO_PROBE] Detected:', detected || 'nothing');
-        if (probes.labels) {
-          console.log('[AUDIO_PROBE] Raw labels:', probes.labels);
-        }
-      }
-    }
-  } catch (e) {
-    console.log('[AUDIO_PROBE] Error:', e.message);
-  }
   // Send technical complete, creative starting event
   if (win) {
     win.webContents.send('jobProgress', {
@@ -836,132 +1709,307 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b', dbFolder = n
       status: 'COMPLETE',
       note: 'Technical analysis complete'
     });
-    win.webContents.send('jobProgress', {
-      trackId: filePath,
-      stage: 'creative',
-      status: 'PROCESSING',
-      note: 'Starting creative analysis with Ollama...'
-    });
   }
-  const dir = path.dirname(filePath);
+  // Kick creative UI immediately (so the UI "lights up" at start)
+  sendCreativeUI(filePath, { status: 'PROCESSING', percent: 0, note: 'Starting creative analysis with Ollama.' });
+  const dir = nodePath.dirname(filePath);
   
-  // Run full creative analysis
-  const creativeResult = await runCreativeAnalysis(baseName, tempo, model, probes.hints);
-  const creative = creativeResult.data;
-  const creativeStatus = creativeResult.modelMissing
+  // v1.1.0: True parallel orchestration - both analyses launch simultaneously
+  // Start instrumentation immediately after probe data is available
+  sendInstrProgress(filePath, 0, 'processing');
+  
+  // Launch both analyses in the same tick for true parallelism
+  const [creativeResult, instrumentationResult] = await Promise.all([
+    runCreativeAnalysis(
+      baseName,
+      finalBpm,
+      model,
+      probes.hints || {},
+      dbFolder
+    ),
+    runInstrumentationAnalysis(filePath, win, probes.hints || {})
+  ]);
+  
+  // v1.3.2: Process structured creative results
+  let creative = creativeResult?.json || {};
+  let creativeStatus = creativeResult?.modelMissing
     ? `Model '${model}' not installed - run: ollama pull ${model}`
-    : creativeResult.offline 
+    : creativeResult?.offline 
     ? 'Ollama offline - creative analysis skipped'
-    : creativeResult.error
+    : !creativeResult?.ok
     ? 'Creative analysis error - using defaults'
     : 'Creative analysis complete';
+  
+  // Only log parse failure when we actually failed to parse
+  if (!creativeResult?.ok) {
+    console.warn("[CREATIVE] JSON parse failed; see creative logs:", creativeResult?.rawPath || '(unknown)');
+  }
+  
   // Send creative complete event
-  if (win) {
-    win.webContents.send('jobProgress', {
-      trackId: filePath,
-      stage: 'creative',
-      status: creativeResult.error ? 'ERROR' : 'COMPLETE',
-      note: creativeStatus
-    });
-  }
+  sendCreativeUI(filePath, {
+    status: !creativeResult?.ok ? 'ERROR' : 'COMPLETE',
+    percent: 100,
+    note: creativeStatus
+  });
   
-  // Lightly merge audio probe hints into creative results (additive only)
-  if (probes.hints && Object.keys(probes.hints).some(k => probes.hints[k])) {
-    const add = (arr, val) => {
-      if (!Array.isArray(arr)) return;
-      if (val && !arr.some(item => item === val || String(item).toLowerCase() === String(val).toLowerCase())) {
-        arr.push(val);
-      }
-    };
-    if (!Array.isArray(creative.instrument)) creative.instrument = [];
-    if (!Array.isArray(creative.vocals)) creative.vocals = [];
-    
-    if (probes.hints.brass) add(creative.instrument, 'Brass (section)');
-    if (probes.hints.trumpet) add(creative.instrument, 'Trumpet');
-    if (probes.hints.trombone) add(creative.instrument, 'Trombone');
-    if (probes.hints.saxophone) add(creative.instrument, 'Saxophone');
-    if (probes.hints.guitar) add(creative.instrument, 'Electric Guitar');
-    if (probes.hints.piano) add(creative.instrument, 'Piano');
-    if (probes.hints.drumkit) add(creative.instrument, 'Drum Kit (acoustic)');
-    
-    // Only infer background vocals if choir specifically detected
-    if (probes.hints.choir &&
-        (creative.vocals.length === 0 || creative.vocals.includes('No Vocals'))) {
-      creative.vocals = ['Background Vocals'];
-    }
+  // Aggregate CLAP/AST into stable instrument hints
+  if (probes && probes.windowsProbes) {
+    const agg = aggregateInstrumentsPerTrack(probes.windowsProbes);
 
-    // If probes say NO vocals/choir, veto LLM vocals to avoid false positives
-    if (!probes.hints.vocals && !probes.hints.choir &&
-        creative.vocals && !creative.vocals.includes('No Vocals')) {
-      creative.vocals = ['No Vocals'];
-    }
+    // Persist improved hints + details
+    probes.hints = agg.hints;              // booleans used across the app
+    probes.details = agg.details;          // ['timpani','cymbals'] etc. (optional but useful)
+
+    // Also merge into creative instruments without removing model output
+    const ensure = (arr, val) => { if (!arr.includes(val)) arr.push(val); };
+    creative.suggestedInstruments = creative.suggestedInstruments || [];
+    if (agg.hints.strings)  ensure(creative.suggestedInstruments, 'Strings (section)');
+    if (agg.hints.brass)    ensure(creative.suggestedInstruments, 'Brass (section)');
+    if (agg.hints.timpani)  ensure(creative.suggestedInstruments, 'Timpani');
+    if (agg.hints.drumkit)  ensure(creative.suggestedInstruments, 'Snare Drum');
+    if (agg.hints.cymbals)  ensure(creative.suggestedInstruments, 'Cymbals');
   }
   
+  // Optional orchestral instrument hints augmentation
+  function _augmentOrchestralInstruments(probeResult) {
+    const labels = new Set([
+      ...(probeResult.raw_labels?.intro || []),
+      ...(probeResult.raw_labels?.middle || []),
+      ...(probeResult.raw_labels?.outro || [])
+    ].map(s => String(s).toLowerCase()));
+    const has = (needle) => [...labels].some(l => l.includes(needle));
+
+    const out = new Set(creative?.suggestedInstruments || []);
+    if (probeResult.hints?.strings || has('string') || has('violin') || has('orchestra')) out.add('Strings (section)');
+    if (probeResult.hints?.brass   || has('brass') || has('trumpet') || has('trombone') || has('horn')) out.add('Brass (section)');
+    if (has('timpani') || has('kettle drum') || has('low tom')) out.add('Timpani');
+    if (has('snare') || has('march')) out.add('Snare');
+    if (has('cymbal') || has('crash') || has('splash') || has('ride') || has('hi-hat')) out.add('Cymbals');
+    creative.suggestedInstruments = Array.from(out);
+  }
+
+  // Apply orchestral augmentation
+  _augmentOrchestralInstruments(probes);
+
+  // Generate pretty instrument list for Search cards
+  const prettyOrder = ['brass','strings','timpani','snare','cymbals','drumkit','piano','guitar','bass','organ','synth'];
+  const prettyNames = { drumkit:'Drum Kit', cymbals:'Cymbals', snare:'Snare', timpani:'Timpani',
+    brass:'Brass', strings:'Strings', piano:'Piano', guitar:'Guitar', bass:'Bass', organ:'Organ', synth:'Synth' };
+
+  const listed = [];
+  for (const key of prettyOrder) {
+    if (probes.hints && probes.hints[key]) listed.push(prettyNames[key]);
+  }
+  for (const d of (probes.details || [])) {
+    const name = prettyNames[d];
+    if (name && !listed.includes(name)) listed.push(name);
+  }
+
+  // NOW build the analysis object (do not write to analysis before this point!)
   const analysis = {
-    file: path.basename(filePath),
-    title: id3Tags.title || path.basename(filePath, path.extname(filePath)),
+    file: baseName,
     path: filePath,
-    id3: id3Tags,
     analyzed_at: new Date().toISOString(),
+    duration_sec: durSec,
+    sample_rate_hz: probe?.sample_rate_hz || probe?.sample_rate || null,
+    channels: probe?.channels || null,
+    bit_rate: probe?.bit_rate || null,
+    title: id3Tags.title || nodePath.basename(filePath, nodePath.extname(filePath)),
+    id3: id3Tags,
     has_wav_version: hasWav,
     ...probe,
-    estimated_tempo_bpm: tempo,
     audio_probes: probes.hints || {},
     creative: creative,
-    creative_status: creativeStatus
+    creative_status: creativeStatus,
+    detected_instruments: listed
   };
+
+
+  // Canonical UI labels for instrument keys coming from probes/ensemble
+  const DISP = {
+    'electric guitar': 'Electric Guitar',
+    'guitar': 'Electric Guitar',
+    'acoustic guitar': 'Acoustic Guitar',
+    'bass': 'Bass Guitar',
+    'drumkit': 'Drum Kit (acoustic)',
+    'piano': 'Piano',
+    'organ': 'Organ',
+    'strings': 'Strings',
+    'brass': 'Brass (section)'
+  };
+
+  // === ENSEMBLE INSTRUMENT ANALYSIS (now handled in parallel) ===
+  // Use the instrumentation results from parallel processing
+  const usedDemucs = Boolean(instrumentationResult && (instrumentationResult.used_demucs || instrumentationResult.usedDemucs));
+  const instrumentsFromPy = Array.isArray(instrumentationResult?.instruments) ? instrumentationResult.instruments : [];
+  const decisionTrace = instrumentationResult?.decision_trace && typeof instrumentationResult.decision_trace === 'object' ? instrumentationResult.decision_trace : null;
+
+  // Persist raw Python outputs for debugging (non-fatal if fails)
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    writeJsonSafe(path.join(LOG_DIR, `ensemble-node-parsed-${stamp}.json`), { usedDemucs, instrumentsFromPy, hasDecisionTrace: !!decisionTrace });
+  } catch (_) {}
+
+  // Use instruments from parallel instrumentation analysis
+  const finalInstruments = instrumentsFromPy.slice();
+  
+  // Debug dump of the decision that will be returned to the app
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    writeJsonSafe(path.join(LOG_DIR, `ensemble-node-decision-${stamp}.json`), {
+      usedDemucs,
+      fromPython: instrumentsFromPy,
+      finalInstruments
+    });
+  } catch (_) {}
+
+  log(`mode=${usedDemucs ? 'stems' : 'mix-only'} instruments: ${finalInstruments.length ? finalInstruments.join(', ') : '(none)'}`);
+
+  // Persist instruments and ensemble metadata on the analysis object
+  analysis.instruments = finalInstruments; // <- this is the canonical field the UI/search uses
+  analysis.instruments_ensemble = {
+    used_demucs: usedDemucs,
+    mode: usedDemucs ? 'stems' : 'mix-only',
+    decision_trace: decisionTrace,
+  };
+
+  // 🚫 Kill legacy / misleading fields so they cannot leak into UI/filters:
+  delete analysis.detected_instruments;       // remove this field entirely
+  delete analysis.audio_probes;               // keep it only if you truly need raw debug; otherwise delete
+  // If you keep audio_probes for dev, ensure UI never reads it.
+  
+  // (Ensure `analysis` has been created/filled up to this point)
+  // --- Prefer ID3 BPM when present (override estimate) ---
+  // NOTE: do this *here* where id3Tags is in-scope, and only if valid/positive.
+  const __id3Parsed = parseId3BpmSafe(id3Tags);
+  if (__id3Parsed != null) {
+    if (finalBpm !== __id3Parsed) {
+      console.log(`[BPM-FINAL] Overriding with ID3 TBPM ${__id3Parsed} (was ${finalBpm ?? 'NULL'})`);
+    } else {
+      console.log(`[BPM-FINAL] ID3 TBPM matches estimate: ${__id3Parsed}`);
+    }
+    finalBpm = __id3Parsed;
+    tempoSource = 'id3';
+  } else {
+    // No usable ID3 TBPM; keep computed estimate and tempoSource as-is
+  }
+
+  // Prepare alternative metrical relatives *after* any ID3 override
+  const __half = (Number.isFinite(finalBpm) ? Math.round(finalBpm * 0.5) : null);
+  const __dbl  = (Number.isFinite(finalBpm) ? Math.round(finalBpm * 2)   : null);
+  const altHalf = (Number.isFinite(__half) && __half >= 50 && __half <= 200) ? __half : '';
+  const altDbl  = (Number.isFinite(__dbl)  && __dbl  >= 50 && __dbl  <= 200) ? __dbl  : '';
+
+  // Persist BPM onto `analysis` and compute CSV diff AFTER `finalBpm` is finalized:
+  const __bpmDiff = applyBpmToAnalysis(analysis, finalBpm, id3Tags);
+  // Also persist source and alternative tempos to JSON (consumed by writers below)
+  if (analysis) {
+    if (tempoSource) analysis.tempo_source = tempoSource; // 'thirds' | 'acf_fallback' | 'id3'
+    // persist confidence only for acf fallback; null otherwise (keeps semantics clean)
+    if (tempoSource === 'acf_fallback' && Number.isFinite(__acfConfidence)) {
+      analysis.tempo_confidence = Number(__acfConfidence.toFixed(3));
+    } else {
+      analysis.tempo_confidence = null;
+    }
+    // Store alt tempos (blank or number) to keep CSV mapping simple
+    if (altHalf !== '') analysis.tempo_alt_half_bpm = altHalf;
+    else delete analysis.tempo_alt_half_bpm;
+    if (altDbl !== '') analysis.tempo_alt_double_bpm = altDbl;
+    else delete analysis.tempo_alt_double_bpm;
+  }
   
   // Write JSON
-  const jsonPath = path.join(dir, `${baseName}.json`);
-  await fs.writeFile(jsonPath, JSON.stringify(analysis, null, 2));
+  const jsonPath = nodePath.join(dir, `${baseName}.json`);
+  console.log(`[TEMPO DEBUG] Saving BPM to JSON for ${baseName}: ${analysis.estimated_tempo_bpm}`);
+  await fsp.writeFile(jsonPath, JSON.stringify(analysis, null, 2));
   
-  // Write CSV in 2-column format (field name, value)
-  const csvPath = path.join(dir, `${baseName}.csv`);
-  
-  // Format duration as MM:SS
-  const formatDuration = (seconds) => {
-    if (!seconds) return '';
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-  
-  const csvRows = [
-    ['Title', baseName],
-    ['', ''],
-    ['--- ID3 Tags ---', ''],
-    ['Track Title', id3Tags.title || ''],
-    ['Artist', id3Tags.artist || ''],
-    ['Album', id3Tags.album || ''],
-    ['Year', id3Tags.year || ''],
-    ['Tagged Genre', (id3Tags.genre || []).join(', ')],
-    ['Tagged BPM', id3Tags.bpm || ''],
-    ['File Path', filePath],
-    ['Has WAV Version', hasWav ? 'Yes' : 'No'],
-    ['Duration (seconds)', analysis.duration_sec || ''],
-    ['Sample Rate (Hz)', analysis.sample_rate || ''],
-    ['Channels', analysis.channels === 2 ? 'Stereo' : analysis.channels === 1 ? 'Mono' : analysis.channels || ''],
-    ['Estimated BPM', analysis.estimated_tempo_bpm || ''],
-    ['BPM Difference', (id3Tags.bpm && analysis.estimated_tempo_bpm) ? Math.abs(id3Tags.bpm - analysis.estimated_tempo_bpm).toFixed(1) : ''],
-    ['Audio Detection', Object.entries(probes.hints || {}).filter(([k, v]) => v).map(([k]) => k).join(', ') || 'None'],
-    ['', ''],
-    ['--- Creative Analysis ---', ''],
-    ['Analysis Status', analysis.creative_status || ''],
-    ['Genre', (analysis.creative?.genre || []).join(', ')],
-    ['Mood', (analysis.creative?.mood || []).join(', ')],
-    ['Theme', (analysis.creative?.theme || []).join(', ')],
-    ['Instruments', (analysis.creative?.instrument || []).join(', ')],
-    ['Vocals', (analysis.creative?.vocals || []).join(', ')],
-    ['Lyric Themes', (analysis.creative?.lyricThemes || []).join(', ')],
-    ['Description', analysis.creative?.narrative || ''],
-    ['Confidence', `${Math.round((analysis.creative?.confidence || 0) * 100)}%`]
-  ];
-  
-  const csvContent = csvRows
-    .map(([field, value]) => `${field},"${value}"`)
-    .join('\n');
-  
-  await fs.writeFile(csvPath, csvContent);
+  // CSV writing with toggle: default OFF; set RNA_WRITE_CSV=1 to re-enable
+  let csvPath = null; // default when disabled
+  const shouldWriteCsvFlag = shouldWriteCsv() && !options.disableCsv;
+
+  if (shouldWriteCsvFlag) {
+    try {
+      // Write CSV in 2-column format (field name, value)
+      csvPath = nodePath.join(dir, `${baseName}.csv`);
+      
+      // Format duration as MM:SS
+      const formatDuration = (seconds) => {
+        if (!seconds) return '';
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+      };
+      
+      const csvRows = [
+        ['Title', baseName],
+        ['', ''],
+        ['--- ID3 Tags ---', ''],
+        ['Track Title', id3Tags.title || ''],
+        ['Artist', id3Tags.artist || ''],
+        ['Album', id3Tags.album || ''],
+        ['Year', id3Tags.year || ''],
+        ['Tagged Genre', (id3Tags.genre || []).join(', ')],
+        ['Tagged BPM', id3Tags.bpm || ''],
+        ['File Path', filePath],
+        ['Has WAV Version', hasWav ? 'Yes' : 'No'],
+        ['Duration (seconds)', analysis.duration_sec || ''],
+        ['Sample Rate (Hz)', analysis.sample_rate || ''],
+        ['Channels', analysis.channels === 2 ? 'Stereo' : analysis.channels === 1 ? 'Mono' : analysis.channels || ''],
+        ['Estimated BPM', (analysis.estimated_tempo_bpm ?? '')], // stays wired to analysis
+        ['Tempo Confidence (0–1)', (analysis.tempo_confidence ?? '')],
+        ['Alt BPM (½×)', altHalf],
+        ['Alt BPM (2×)', altDbl],
+        ['Tempo Source', tempoSource],
+        ['BPM Difference', __bpmDiff],                           // blank if either side missing
+        // Audio Detection with robust fallback
+        (() => {
+          const audioDetected = Array.isArray(analysis?.finalInstruments)
+            ? analysis.finalInstruments
+            : (analysis?.instruments || []);
+          return ['Audio Detection', audioDetected.join('; ') || 'None'];
+        })(),
+        ['Run ID', analysis.__run_id || ''],
+        // Audio Sources with robust fallback
+        (() => {
+          let audioSources = "";
+          if (analysis?.__source_flags?.sources) {
+            audioSources = Object.entries(analysis.__source_flags.sources)
+              .filter(([,v]) => v)
+              .map(([k]) => k)
+              .join(", ");
+          } else if (analysis?.instrument_source) {
+            audioSources = analysis.instrument_source; // fallback to python field
+          } else {
+            audioSources = "ensemble"; // final fallback
+          }
+          return ['Audio Sources', audioSources];
+        })(),
+        ['', ''],
+        ['--- Creative Analysis ---', ''],
+        ['Analysis Status', analysis.creative_status || ''],
+        ['Genre', (analysis.creative?.genre || []).join(', ')],
+        ['Mood', (analysis.creative?.mood || []).join(', ')],
+        ['Theme', (analysis.creative?.theme || []).join(', ')],
+        ['Instruments', (analysis.creative?.suggestedInstruments || []).join(', ')],
+        ['Vocals', (analysis.creative?.vocals || []).join(', ')],
+        ['Lyric Themes', (analysis.creative?.lyricThemes || []).join(', ')],
+        ['Description', analysis.creative?.narrative || ''],
+        ['Confidence', `${Math.round((analysis.creative?.confidence || 0) * 100)}%`]
+      ];
+      
+      const csvContent = csvRows
+        .map(([field, value]) => `${field},"${value}"`)
+        .join('\n');
+      
+      await fsp.writeFile(csvPath, csvContent);
+      console.log("[CSV] Wrote:", csvPath);
+    } catch (e) {
+      console.warn("[CSV] Failed to write CSV:", e?.message || e);
+      // keep csvPath as null on failure
+    }
+  } else {
+    console.log("[CSV] Skipped (disabled via writeCsvArtifacts setting or disableCsv option)");
+  }
   
   // Generate waveform PNG if dbFolder provided
   if (dbFolder) {
@@ -974,7 +2022,7 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b', dbFolder = n
       analysis.waveform_png = waveformResult.pngPath;
       
       // Re-write JSON with waveform path
-      await fs.writeFile(jsonPath, JSON.stringify(analysis, null, 2));
+      await fsp.writeFile(jsonPath, JSON.stringify(analysis, null, 2));
     } catch (e) {
       console.log('[WAVEFORM] PNG generation failed:', e.message);
     }
@@ -983,6 +2031,59 @@ async function analyzeMp3(filePath, win = null, model = 'qwen3:8b', dbFolder = n
   return { analysis, jsonPath, csvPath };
 }
 
-module.exports = { analyzeMp3 };
+// v2.0.0: Technical-only stage for true parallel processing
+async function technicalOnly(filePath, win = null) {
+  const baseName = nodePath.basename(filePath, nodePath.extname(filePath));
+  if (win) {
+    win.webContents.send('jobProgress', {
+      trackId: filePath, stage: 'technical', status: 'PROCESSING', note: 'Running technical analysis...'
+    });
+  }
+
+  // Probe container/stream
+  const probe = await ffprobeJson(filePath);
+  const durationSec = probe?.duration_sec || 0;
+
+  // Audio probes (instrument families, percussion hints, etc.)
+  let audioHints = {};
+  try {
+    if (durationSec > 5) {
+      const p = await runAudioProbes(filePath, durationSec, baseName);
+      audioHints = (p && p.hints) ? p.hints : {};
+    }
+  } catch (e) {
+    console.log('[TECH-ONLY] audio probes failed:', e.message);
+  }
+
+  // Tempo estimate: try thirds window first, then ACF fallback
+  let bpm = null;
+  try {
+    bpm = await estimateTempoThirds(filePath, durationSec, audioHints);
+    if (!Number.isFinite(bpm) || bpm <= 0) {
+      bpm = await estimateTempoACF(filePath, durationSec, audioHints);
+    }
+    if (!Number.isFinite(bpm) || bpm <= 0) bpm = null;
+  } catch (e) {
+    console.log('[TECH-ONLY] tempo estimate failed:', e.message);
+    bpm = null;
+  }
+
+  // (CSV moved to finalizer; no TECH CSV write)
+  
+  console.log('[TECH-ONLY] DONE', baseName, 'bpm=', bpm, 'hints=', Object.keys(audioHints).filter(k => audioHints[k]).join(','));
+  if (win) {
+    win.webContents.send('jobProgress', {
+      trackId: filePath, stage: 'technical', status: 'COMPLETE', bpm: bpm || null
+    });
+  }
+  return { bpm, audioHints };
+}
+
+module.exports = { 
+  analyzeMp3, 
+  technicalOnly, 
+  runCreativeAnalysis, 
+  runInstrumentationAnalysis 
+};
 
 

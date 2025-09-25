@@ -78,7 +78,8 @@
       #drop-zone {
         border: 2px dashed #d0d0d0;
         border-radius: 8px;
-        padding: 80px 40px;
+        padding: 36px 32px;     /* was 24px 24px */
+        min-height: 180px;      /* increase for a taller target */
         text-align: center;
         background: #fafafa;
         transition: all 0.2s ease;
@@ -223,6 +224,43 @@
         font-size: 14px;
       }
       
+      .analysis-table-scroll {
+        max-height: 60vh;
+        overflow-y: auto;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        background: #fff;
+      }
+      .analysis-table-scroll .queue-table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+      }
+      .analysis-table-scroll thead th {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        background: #4b5563;  /* medium grey */
+        color: #ffffff;        /* white text */
+      }
+      
+      .analysis-table-scroll::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      .analysis-table-scroll::-webkit-scrollbar-track {
+        background: #f2f2f2;
+        border-radius: 8px;
+      }
+      .analysis-table-scroll::-webkit-scrollbar-thumb {
+        background: #c4c4c4;
+        border-radius: 8px;
+        border: 2px solid #f2f2f2;
+      }
+      .analysis-table-scroll::-webkit-scrollbar-thumb:hover {
+        background: #a8a8a8;
+      }
+      
       .status-badge {
         display: inline-block;
         padding: 4px 8px;
@@ -237,6 +275,11 @@
       }
       
       .status-processing {
+        background: #fff3cd;
+        color: #856404;
+      }
+      
+      .status-25%, .status-50%, .status-75% {
         background: #fff3cd;
         color: #856404;
       }

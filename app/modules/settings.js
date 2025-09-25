@@ -12,4 +12,9 @@ export class SettingsStore {
     // - Concurrency settings
 }
 
+// Hidden env-backed setting to enable diagnostics
+export function isInstrumentDiagEnabled() {
+    return !!process.env.RNA_DIAG_INSTRUMENTS;
+}
+
 

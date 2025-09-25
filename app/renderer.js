@@ -2,6 +2,143 @@
 
 import { DragDrop } from './modules/dragdrop.js';
 import { SettingsStore } from './modules/settings.js';
+import { normalizeAnalysis } from './renderer/normalize_analysis.js';
+import { getDetectedInstruments, getCreativeInstruments, deriveSectionTags } from './renderer/instrument_access.js';
+
+// Resolve absolute file path for a track across DB shapes
+function getAbsPath(track) {
+  return (
+    track?.path ||
+    track?.source?.filePath ||
+    track?.filePath ||
+    track?.jsonPath ||
+    track?.fileName ||
+    ''
+  );
+}
+
+// v1.0.0: Apple Silicon Acceleration - TFJS backend selection (renderer only)
+(async () => {
+  try {
+    const tf = await import('@tensorflow/tfjs');
+    // Try WebGPU first
+    if (tf.findBackend && tf.findBackend('webgpu')) {
+      await tf.setBackend('webgpu');
+    } else {
+      // Lazy import webgpu backend (in case preload didn't)
+      try { await import('@tensorflow/tfjs-backend-webgpu'); await tf.setBackend('webgpu'); } catch {}
+    }
+
+    // If webgpu not ready/available, gracefully fallback
+    if (tf.getBackend() !== 'webgpu') {
+      try { await tf.setBackend('webgl'); } catch {}
+    }
+    if (tf.getBackend() !== 'webgpu' && tf.getBackend() !== 'webgl') {
+      try { await import('@tensorflow/tfjs-backend-wasm'); await tf.setBackend('wasm'); } catch {}
+    }
+
+    await (tf.ready && tf.ready()); // ensure backend is initialized
+    console.log('[ACCEL] TFJS backend:', tf.getBackend());
+  } catch (e) {
+    console.warn('[ACCEL] TFJS backend selection failed:', e?.message || e);
+  }
+})();
+
+// transformers.js (Xenova) will use env set in preload.js. No extra code needed here.
+
+// Safety valve: Only show extra signals when explicitly toggled ON (default OFF)
+const SHOW_EXTRAS = false;
+
+// Helper function to render creative instruments as "Suggested (LLM)" with visual distinction
+function renderSuggestedInstruments(track) {
+    const suggested = getCreativeInstruments(track);
+    if (!suggested.length) return null;
+    
+    // Filter to known taxonomy (optional - you can implement ALL_INSTRUMENT_LABELS if needed)
+    // const SUGGESTED_DISPLAY = suggested.filter(x => ALL_INSTRUMENT_LABELS.has(x));
+    const SUGGESTED_DISPLAY = suggested; // For now, show all suggested instruments
+    
+    return {
+        instruments: SUGGESTED_DISPLAY,
+        label: 'Suggested (LLM – not used for search)',
+        muted: true,
+        readonly: true
+    };
+}
+
+// v4.0.0: Enhanced path matching for robust row lookup
+function normPath(p) {
+    return decodeURI(String(p || ""))
+        .replace(/\\/g, "/")
+        .replace(/\/+$/, "")
+        .toLowerCase();
+}
+
+function findRowByPath(filePath) {
+    const key = normPath(filePath);
+    return currentQueue.find(r => 
+        normPath(r.filePath) === key || 
+        normPath(r.jsonPath) === key ||
+        normPath(r.path) === key ||
+        normPath(r.fileName) === key ||
+        normPath(r.filename) === key
+    );
+}
+
+// v4.0.0: Badge renderer for consistent styling across all columns
+function renderStatusBadge(value) {
+    const v = String(value || "").toLowerCase();
+    let label = (value || 'QUEUED').toString().toUpperCase();
+    
+    // Handle special cases
+    if (v === 'processing') {
+        label = '⏳ PROCESSING';
+    } else if (v === '25%' || v === '50%' || v === '75%') {
+        // show the percent inside the processing badge
+        label = value.toString().toUpperCase(); // "25%" etc.
+    }
+    
+    if (v === "complete") return '<span class="status-badge status-complete">COMPLETE</span>';
+    if (v === "processing" || v === "25%" || v === "50%" || v === "75%") {
+        return `<span class="status-badge status-processing">${label}</span>`;
+    }
+    if (v === "waiting") return '<span class="status-badge status-waiting">WAITING</span>';
+    if (v === "error") return '<span class="status-badge status-error">ERROR</span>';
+    if (v === "queued") return '<span class="status-badge status-queued">QUEUED</span>';
+    if (v === "skip") return '<span class="status-badge status-skip">SKIP</span>';
+    // fallback (show raw, styled as processing)
+    return `<span class="status-badge status-processing">${label}</span>`;
+}
+
+// Helper function to get instrumentation cell for a row
+function getInstrumentationCellForRow(row) {
+    // This will be implemented to find the specific cell in the table
+    // For now, we'll use the existing updateQueueDisplay mechanism
+    return null; // Placeholder - will be handled by updateQueueDisplay
+}
+
+// Helper function to render instrument pills with visual styling
+function renderPills(instruments, options = {}) {
+    const { muted = false, label = '', readonly = false } = options;
+    
+    if (!instruments || !instruments.length) return '';
+    
+    const pillClass = muted ? 'instrument-pill muted' : 'instrument-pill';
+    const readonlyAttr = readonly ? 'readonly' : '';
+    
+    const pills = instruments.map(inst => 
+        `<span class="${pillClass}" ${readonlyAttr}>${inst}</span>`
+    ).join(' ');
+    
+    return label ? `<div class="instrument-section"><strong>${label}</strong><br/>${pills}</div>` : pills;
+}
+
+// Helper function to get detected instruments for display
+// This should be used for all UI rendering and filtering - never use creative.instrument
+function getDetectedInstrumentsForDisplay(track) {
+    const detected = getDetectedInstruments(track);
+    return deriveSectionTags(detected);
+}
 
 // Instantiate modules to trigger init logs
 const dragDrop = new DragDrop();
@@ -10,6 +147,22 @@ const settingsStore = new SettingsStore();
 const panel = document.getElementById('panel');
 let currentQueue = [];
 let allowReanalyze = false;
+
+// Single source of truth for UI state
+const state = { 
+    isAnalyzing: false, 
+    selectedFiles: [], 
+    reanalyze: false 
+};
+
+// Update start button enabled state
+function updateStartButton() {
+    const btn = document.getElementById('start-analysis');
+    const canStart = currentQueue.length > 0 && !state.isAnalyzing;
+    if (btn) {
+        btn.disabled = !canStart;
+    }
+}
 
 const views = {
     analysis: `
@@ -137,7 +290,6 @@ const views = {
 
 let currentView = 'analysis';
 let currentSettings = {};
-let progressStatus = {};
 
 async function setupSettingsView() {
     try {
@@ -295,6 +447,15 @@ async function setupSearchView() {
 
         // Normalize tracks once
         ALL_TRACKS = normalizeTracks(dbData.rhythm);
+        
+        // Normalize analysis objects to prefer ensemble instruments
+        ALL_TRACKS.forEach(track => {
+            if (track.analysis) {
+                normalizeAnalysis(track.analysis);
+            }
+        });
+        
+        window.CURRENT_TRACKS = ALL_TRACKS; // Make tracks available for tempo band counting
         console.log('[SEARCH] Loaded', ALL_TRACKS.length, 'tracks');
         
         if (!ALL_TRACKS.length) {
@@ -305,12 +466,20 @@ async function setupSearchView() {
         
         // Pre-compute searchable fields for performance
         ALL_TRACKS.forEach(track => {
-            // Pre-compute instruments (union of creative + audio_probes)
-            const instruments = [...(track.creative?.instrument || [])];
-            Object.entries(track.audio_probes || {}).forEach(([k, v]) => {
-                if (v === true) instruments.push(k);
-            });
-            track._instruments = new Set(instruments.map(v => String(v).toLowerCase()));
+        // Pre-compute instruments (DETECTED only for filtering)
+        // Use only ensemble-driven analysis.instruments - no creative, no audio_probes
+        const detected = getDetectedInstruments(track);
+
+        // Derive section tags for display purposes only (not stored in analysis.instruments)
+        const displayInstruments = deriveSectionTags(detected);
+
+        // Defensive log to catch any future leakage
+        const shown = new Set(track.analysis?.instruments || []);
+        const llm = new Set((track.analysis?.creative && track.analysis.creative.suggestedInstruments) || []);
+        const leaking = [...llm].filter(x => !shown.has(x));
+        if (leaking.length) console.debug('[INSTRUMENTS] ignoring LLM-only labels:', leaking);
+
+        track._instruments = new Set(displayInstruments.map(v => String(v).toLowerCase()));
             
             // Pre-compute vocals (keep original format)
             track._vocals = track.creative?.vocals || track.audio_probes?.vocals || null;
@@ -341,6 +510,7 @@ async function setupSearchView() {
 function showRandomSample() {
     const sample = [...ALL_TRACKS].sort(() => Math.random() - 0.5).slice(0, 10);
     CURRENT_RESULTS = sample;
+    window.CURRENT_TRACKS = sample; // Update current tracks for tempo band counting
     CURRENT_PAGE = 1;
     
     renderPage(sample, 1);
@@ -361,6 +531,7 @@ function setupSearchHandlers() {
         
         // Apply filters
         CURRENT_RESULTS = filterTracksOptimized(ALL_TRACKS, FILTER_STATE);
+        window.CURRENT_TRACKS = CURRENT_RESULTS; // Update current tracks for tempo band counting
         CURRENT_PAGE = 1;
         IS_DIRTY = false;
         
@@ -442,6 +613,13 @@ function pickDuration(track) {
     return track.duration_sec ?? track.analysis?.duration_sec ?? track.creative?.duration_sec ?? null;
 }
 
+function matchesInstrument(t, tags) {
+    const detected = getDetectedInstruments(t);
+    const displayInstruments = deriveSectionTags(detected);
+    const cur = new Set(displayInstruments.map(v => String(v).toLowerCase()));
+    return tags.every(tag => cur.has(String(tag).toLowerCase()));
+}
+
 const norm = (s) => String(s).trim().toLowerCase();
 
 function parseTempoRangeLabel(label) {
@@ -449,6 +627,16 @@ function parseTempoRangeLabel(label) {
     const match = String(label).match(/(\d+)\s*[-–]\s*(\d+)/);
     if (!match) return null;
     return { min: Number(match[1]), max: Number(match[2]) };
+}
+
+// Parse tempo band label to get numeric range
+function parseTempoBandLabel(label) {
+    for (const band of TEMPO_BANDS) {
+        if (band.label === label) {
+            return { min: band.min, max: band.max };
+        }
+    }
+    return null;
 }
 
 function filterTracksOptimized(tracks, filters) {
@@ -459,7 +647,11 @@ function filterTracksOptimized(tracks, filters) {
     const tempoRanges = [];
     if (filters.tempoBands && filters.tempoBands.size > 0) {
         [...filters.tempoBands].forEach(label => {
-            const range = parseTempoRangeLabel(label);
+            // Try new tempo band format first, then fall back to old format
+            let range = parseTempoBandLabel(label);
+            if (!range) {
+                range = parseTempoRangeLabel(label);
+            }
             if (range) tempoRanges.push(range);
         });
     }
@@ -468,7 +660,11 @@ function filterTracksOptimized(tracks, filters) {
         // Check tempo bands first (special numeric handling)
         if (tempoRanges.length > 0) {
             const bpm = Number(track.estimated_tempo_bpm || track.creative?.bpm || track.bpm || 0);
-            if (!bpm || !tempoRanges.some(r => bpm >= r.min && bpm <= r.max)) {
+            if (!bpm || !tempoRanges.some(r => {
+                const okMin = r.min == null || bpm >= r.min;
+                const okMax = r.max == null || bpm < r.max;
+                return okMin && okMax;
+            })) {
                 return false;
             }
         }
@@ -481,7 +677,7 @@ function filterTracksOptimized(tracks, filters) {
             
             let match = false;
             if (facet === 'instrument') {
-                match = [...normalizedFilter].some(v => track._instruments.has(v));
+                match = matchesInstrument(track, [...normalizedFilter]);
             } else if (facet === 'vocals') {
                 // Handle vocals properly - can be array, string, or boolean
                 let trackValues = [];
@@ -559,9 +755,51 @@ function facetLabels(src) {
     return [];
 }
 
+// Tempo bands exactly as in the screenshot
+const TEMPO_BANDS = [
+    { key: 'very_slow', label: 'Very Slow (Below 60 BPM)', min: null, max: 60 },
+    { key: 'slow',      label: 'Slow (60-90 BPM)',         min: 60,  max: 90  },
+    { key: 'medium',    label: 'Medium (90-110 BPM)',      min: 90,  max: 110 },
+    { key: 'upbeat',    label: 'Upbeat (110-140 BPM)',     min: 110, max: 140 },
+    { key: 'fast',      label: 'Fast (140-160 BPM)',       min: 140, max: 160 },
+    { key: 'very_fast', label: 'Very Fast (160+ BPM)',     min: 160, max: null },
+];
+
+// Pull BPM from any of the fields we write in analysis JSON
+function getTrackBpm(track) {
+    const v = track?.tempo_bpm ?? track?.estimated_tempo_bpm ?? track?.bpm ?? null;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Count how many results land in each band
+function countTempoBands(tracks) {
+    const counts = {};
+    TEMPO_BANDS.forEach(b => counts[b.key] = 0);
+    
+    for (const t of tracks || []) {
+        const bpm = getTrackBpm(t);
+        if (bpm == null) continue;
+        
+        for (const b of TEMPO_BANDS) {
+            const okMin = b.min == null || bpm >= b.min;
+            const okMax = b.max == null || bpm < b.max;
+            if (okMin && okMax) { 
+                counts[b.key]++; 
+                break; 
+            }
+        }
+    }
+    return counts;
+}
+
 function renderFilters(criteria) {
     const mount = document.getElementById('search-filters');
     mount.innerHTML = '';
+    
+    // Get current tracks for tempo band counting
+    const currentTracks = window.CURRENT_TRACKS || [];
+    const tempoCounts = countTempoBands(currentTracks);
     
     const sections = [
         { key: 'instrument', label: 'Instruments', values: facetLabels(criteria.instrument) },
@@ -575,6 +813,54 @@ function renderFilters(criteria) {
     ];
     
     sections.forEach(({ key, label, values }) => {
+        // Special handling for tempo bands
+        if (key === 'tempoBands') {
+            const box = document.createElement('details');
+            box.open = true; // Keep tempo section open by default
+            box.style.marginBottom = '12px';
+            box.innerHTML = `
+                <summary style="cursor:pointer;font-weight:600;padding:4px 0;">${label}</summary>
+                <div style="padding-left:10px;max-height:240px;overflow-y:auto;"></div>
+            `;
+            const body = box.querySelector('div');
+            
+            // Render tempo band checkboxes
+            TEMPO_BANDS.forEach(band => {
+                const count = tempoCounts[band.key] || 0;
+                if (count === 0) return; // Only show bands with tracks
+                
+                const row = document.createElement('label');
+                row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer;';
+                
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.dataset.facet = 'tempoBands';
+                checkbox.value = band.label;
+                checkbox.style.marginRight = '6px';
+                
+                const labelSpan = document.createElement('span');
+                labelSpan.textContent = band.label;
+                
+                const countSpan = document.createElement('span');
+                countSpan.textContent = `(${count})`;
+                countSpan.style.opacity = '0.6';
+                
+                row.appendChild(checkbox);
+                row.appendChild(labelSpan);
+                row.appendChild(countSpan);
+                body.appendChild(row);
+            });
+            
+            if (body.children.length === 0) {
+                // No tempo bands have tracks, don't show the section
+                return;
+            }
+            
+            mount.appendChild(box);
+            return;
+        }
+        
+        // Regular sections (non-tempo)
         if (!values.length) return;
         const box = document.createElement('details');
         box.open = (key === 'genre' || key === 'mood');
@@ -591,6 +877,15 @@ function renderFilters(criteria) {
             body.appendChild(row);
         });
         mount.appendChild(box);
+    });
+    
+    // Restore checkbox states from current filter state
+    mount.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
+        const facet = checkbox.dataset.facet;
+        const value = checkbox.value;
+        if (FILTER_STATE[facet] && FILTER_STATE[facet].has(value)) {
+            checkbox.checked = true;
+        }
     });
     
     // Track filter changes
@@ -674,14 +969,16 @@ function renderResults(mount, list) {
     mount.innerHTML = '';
     
     list.forEach((track) => {
-        const title = track.title || track.id3?.title || 
-                     track.path?.split('/').pop()?.replace(/\.(mp3|wav)$/i,'') || 
+        const absPath = getAbsPath(track);
+        const title = track.title || track.id3?.title ||
+                     absPath?.split('/').pop()?.replace(/\.(mp3|wav)$/i,'') ||
+                     track?.source?.fileName?.replace(/\.(mp3|wav)$/i,'') ||
                      'Unknown Track';
-        const artist = track.artist || track.id3?.artist || '';
+        const artist = track.artist || track.id3?.artist || track?.creative?.artist || '';
         
         const card = document.createElement('div');
         card.style.cssText = 'border:1px solid #e5e5e5;border-radius:8px;padding:12px;margin-bottom:12px;background:#fff;';
-        card.dataset.trackPath = track.path;
+        card.dataset.trackPath = absPath;
 
         // Header with title and buttons
         const header = document.createElement('div');
@@ -705,7 +1002,7 @@ function renderResults(mount, list) {
         finderBtn.textContent = 'Show File';
         finderBtn.style.cssText = 'padding:6px 10px;background:#007AFF;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;';
         finderBtn.onclick = async () => {
-            const p = track.path || '';
+            const p = getAbsPath(track) || '';
             
             // Check if this is a /Volumes/<ShareName> path
             const match = p.match(/^\/Volumes\/([^/]+)/);
@@ -780,7 +1077,20 @@ function renderResults(mount, list) {
         wavPill.style.cssText = 'display:none;padding:2px 6px;border-radius:10px;background:#e0f2ff;color:#0369a1;font-size:11px;font-weight:600;';
         wavPill.textContent = 'WAV';
 
+        // Vocals badge - only show if vocals are present
+        const vocalsPill = document.createElement('span');
+        vocalsPill.className = 'vocals-pill';
+        vocalsPill.style.cssText = 'padding:2px 6px;border-radius:10px;background:#fef3c7;color:#92400e;font-size:11px;font-weight:600;';
+        vocalsPill.textContent = 'Vocals';
+        
+        // Hide vocals badge if vocals array is empty or null
+        const vocals = track.creative?.vocals || [];
+        if (!Array.isArray(vocals) || vocals.length === 0) {
+            vocalsPill.style.display = 'none';
+        }
+
         rightMeta.appendChild(durEl);
+        rightMeta.appendChild(vocalsPill);
         rightMeta.appendChild(wavPill);
 
         meta.appendChild(descEl);
@@ -791,7 +1101,9 @@ function renderResults(mount, list) {
         const ensurePng = async () => {
             if (track.waveform_png) return track.waveform_png;
             try {
-                const r = await window.api.getWaveformPng(track.path);
+                const abs = getAbsPath(track);
+                if (!abs) return null;
+                const r = await window.api.getWaveformPng(abs);
                 if (r?.ok && r.png) {
                     track.waveform_png = r.png;
                     return r.png;
@@ -809,7 +1121,12 @@ function renderResults(mount, list) {
 
         // Wire up playback button
         playBtn.onclick = async () => {
-            const src = track.wavPath && track.wavPath.length ? track.wavPath : track.path;
+            const abs = getAbsPath(track);
+            const src = (track.wavPath && track.wavPath.length) ? track.wavPath : abs;
+            if (!src) {
+                console.warn('[SEARCH] No path found for playback.');
+                return;
+            }
             
             // Auto-mount SMB if needed for playback
             const match = src.match(/^\/Volumes\/([^/]+)/);
@@ -829,7 +1146,7 @@ function renderResults(mount, list) {
             const url = toFileUrl(src);
             
             // Stop other tracks
-            if (__playingPath && __playingPath !== track.path) {
+            if (__playingPath && __playingPath !== abs) {
                 document.querySelectorAll('.rdna-play').forEach(b => (b.textContent = 'Play'));
                 document.querySelectorAll('.playhead').forEach(ph => {
                     ph.style.display = 'none';
@@ -838,7 +1155,7 @@ function renderResults(mount, list) {
             }
             
             // Toggle play/pause
-            if (__playingPath === track.path && !__audio.paused) {
+            if (__playingPath === abs && !__audio.paused) {
                 __audio.pause();
                 playBtn.textContent = 'Play';
                 cancelAnimationFrame(__raf);
@@ -846,7 +1163,7 @@ function renderResults(mount, list) {
             }
             
             __audio.src = url;
-            __playingPath = track.path;
+            __playingPath = abs;
             playBtn.textContent = 'Pause';
             playhead.style.display = 'block';
             
@@ -864,18 +1181,19 @@ function renderResults(mount, list) {
 
         // Show WAV badge if a WAV version exists
         (async () => {
+            const abs = getAbsPath(track);
             let hasWav = Boolean(track.wavPath && track.wavPath.length);
             try {
                 // Check if IPC can tell us about versions
                 if (!hasWav && window.api.searchGetVersions) {
-                    const v = await window.api.searchGetVersions(track.path);
+                    const v = await window.api.searchGetVersions(abs);
                     hasWav = Boolean(v && (v.hasWav || v.wav));
                 }
             } catch {}
             
             // Fallback: check if the original is a WAV
-            if (!hasWav) {
-                const p = (track.path || '').toLowerCase();
+            if (!hasWav && abs) {
+                const p = String(abs || '').toLowerCase();
                 hasWav = p.endsWith('.wav');
             }
             
@@ -918,12 +1236,18 @@ function setupAnalysisView() {
                     if (t.hasExistingAnalysis) existing.hasExistingAnalysis = true;
                     if (!existing.fileName && t.fileName) existing.fileName = t.fileName;
                 } else {
+        // v1.0.0: Initialize instrumentation state for new tracks
+        t.instrumentationState = 'waiting';
+        t.instrumentationDisplay = 'waiting';
+        t.instrumentationPct = 0; // 0,25,50,75,100
                     byPath.set(key, t);
                 }
             }
             
             currentQueue = Array.from(byPath.values());
+            state.selectedFiles = currentQueue;
             updateQueueDisplay();
+            updateStartButton();
         });
     }
     
@@ -932,19 +1256,25 @@ function setupAnalysisView() {
     if (reanalyzeCheckbox) {
         reanalyzeCheckbox.addEventListener('change', (e) => {
             allowReanalyze = e.target.checked;
+            state.reanalyze = e.target.checked;
             console.log('[Renderer] Re-analyze mode:', allowReanalyze);
             updateQueueDisplay();
+            updateStartButton();
         });
         // Set initial state
         allowReanalyze = reanalyzeCheckbox.checked;
+        state.reanalyze = reanalyzeCheckbox.checked;
     }
     
     // Start Analysis button
     const startBtn = document.getElementById('start-analysis');
     if (startBtn) {
         startBtn.addEventListener('click', async () => {
+            if (startBtn.disabled) return;
             console.log('[Renderer] Start Analysis clicked');
-            await processQueue();
+            state.isAnalyzing = true;
+            updateStartButton();
+            await processQueueNonBlocking();
         });
     }
     
@@ -954,17 +1284,244 @@ function setupAnalysisView() {
         clearBtn.addEventListener('click', () => {
             console.log('[Renderer] Clear Queue clicked');
             currentQueue = [];
+            state.selectedFiles = [];
             updateQueueDisplay();
+            updateStartButton();
         });
     }
     
     updateQueueDisplay();
+    updateStartButton();
+    
+    // v4.0.0: Listen for instrumentation start events (flip from waiting → processing)
+    window.instrumentation?.onStart?.(({ file }) => {
+        const row = findRowByPath(file);
+        if (!row) return;
+        row.instrumentationState = 'processing';
+        row.instrumentationDisplay = 'processing';
+        row.instrumentationPct = 0;
+        updateQueueDisplay();
+    });
+    
+    // v4.0.0: KISS checkpoint percentages with badge styling
+    window.instrumentation?.onProgress?.(({ file, pct = 0, label }) => {
+        const row = findRowByPath(file);
+        if (!row) return;
+        row.instrumentationState = 'processing';
+        row.instrumentationPct = pct;
+        if (pct >= 100) {
+            row.instrumentationDisplay = 'complete';
+        } else if (pct >= 75) {
+            row.instrumentationDisplay = '75%';
+        } else if (pct >= 50) {
+            row.instrumentationDisplay = '50%';
+        } else if (pct >= 25) {
+            row.instrumentationDisplay = '25%';
+        } else {
+            row.instrumentationDisplay = label || 'processing';
+        }
+        updateQueueDisplay();
+    });
+    
+    // v1.0.0: New instrumentation event listeners
+    window.api?.onInstrumentationStatus?.(({ filePath, status }) => {
+        const row = findRowByPath(filePath);
+        if (!row) return;
+        row.instrumentationState = status;
+        if (status === 'processing') {
+            row.instrumentationDisplay = 'processing';
+            row.instrumentationPct = 0;
+        } else if (status === 'complete') {
+            row.instrumentationDisplay = 'complete';
+            row.instrumentationPct = 100;
+        } else if (status === 'error') {
+            row.instrumentationDisplay = 'error';
+        }
+        updateQueueDisplay();
+    });
+    
+    window.api?.onInstrumentationProgress?.(({ filePath, percent, note }) => {
+        const row = findRowByPath(filePath);
+        if (!row) return;
+        row.instrumentationState = percent >= 100 ? 'complete' : 'processing';
+        row.instrumentationPct = percent;
+        if (percent >= 100) {
+            row.instrumentationDisplay = 'complete';
+        } else if (percent >= 75) {
+            row.instrumentationDisplay = '75%';
+        } else if (percent >= 50) {
+            row.instrumentationDisplay = '50%';
+        } else if (percent >= 25) {
+            row.instrumentationDisplay = '25%';
+        } else {
+            row.instrumentationDisplay = 'processing';
+        }
+        updateQueueDisplay();
+    });
+}
+
+// v1.0.0: Start instrumentation for a specific track
+function startInstrumentation(track) {
+    console.log('[Renderer] Starting instrumentation for:', track.fileName);
+    
+    // Set instrumentation to processing
+    track.instrumentationState = 'processing';
+    track.instrumentationDisplay = 'processing';
+    track.instrumentationPct = 0;
+    updateQueueDisplay();
+    
+    // Note: The actual ensemble analysis happens in the main process
+    // This function just updates the UI state when instrumentation starts
+}
+
+async function processQueueNonBlocking() {
+    const audioRe = /\.(mp3|wav|m4a|flac|aac|ogg)$/i;
+    const allowReanalyze = !!document.getElementById('allow-reanalyze')?.checked;
+
+    const paths = currentQueue
+       .filter(t => t.path && audioRe.test(t.path))
+       .filter(t => !(t.hasExistingAnalysis && !allowReanalyze))
+       .map(t => t.path);
+
+    if (!paths.length) {
+        console.log('[Renderer] No eligible files to enqueue');
+        return;
+    }
+
+    // Mark as QUEUED; UI will update from progress events
+    currentQueue.forEach(t => {
+        if (paths.includes(t.path)) {
+            t.status = 'QUEUED';
+            t.techStatus = 'QUEUED';
+            t.creativeStatus = 'QUEUED';
+        }
+    });
+    updateQueueDisplay();
+
+    try {
+        const res = await window.api.analyzeFiles(paths, allowReanalyze);
+        console.log('[Renderer] analyzeFiles result:', res);
+    } finally {
+        state.isAnalyzing = false;
+        updateStartButton();
+    }
 }
 
 async function processQueue() {
-    console.log('[Renderer] Start Analysis clicked - main process handles everything');
-    // The main process already has the queue from drop events
-    // It will process automatically
+    console.log('[Renderer] Start Analysis clicked');
+    
+    if (currentQueue.length === 0) {
+        console.log('[Renderer] Queue is empty');
+        return;
+    }
+    
+    // Filter to audio files (not just MP3)
+    const audioRe = /\.(mp3|wav|m4a|flac|aiff|aif)$/i;
+    const audioTracks = currentQueue.filter(track => 
+        track.path && audioRe.test(track.path)
+    );
+    
+    if (audioTracks.length === 0) {
+        console.log('[Renderer] No audio files in queue');
+        return;
+    }
+    
+    // Filter out files that shouldn't be processed
+    const tracksToProcess = audioTracks.filter(track => {
+        if (track.hasExistingAnalysis && !allowReanalyze) {
+            console.log(`[Renderer] Skipping existing: ${track.fileName}`);
+            track.status = 'SKIP';
+            return false;
+        }
+        return true;
+    });
+    
+    if (tracksToProcess.length === 0) {
+        console.log('[Renderer] All files would be skipped');
+        updateQueueDisplay();
+        return;
+    }
+    
+    console.log(`[Renderer] Processing ${tracksToProcess.length} of ${audioTracks.length} files`);
+    
+    // Get concurrency from settings
+    const settings = await window.api.getSettings();
+    const concurrency = settings.techConcurrency || 4;
+    
+    // Process with worker pool
+    let activeWorkers = 0;
+    let trackIndex = 0;
+    
+    const processNextTrack = async () => {
+        if (trackIndex >= tracksToProcess.length) {
+            return;
+        }
+        
+        const track = tracksToProcess[trackIndex++];
+        activeWorkers++;
+        
+        try {
+            track.status = 'PROCESSING';
+            updateQueueDisplay();
+            
+            const result = await window.api.analyzeFile(track.path);
+            
+            if (result.success) {
+                track.status = 'COMPLETE';
+                track.techStatus = 'COMPLETE';
+                track.creativeStatus = 'COMPLETE';
+                console.log(`[Renderer] Complete: ${track.fileName}`);
+                
+                // Normalize analysis data if present in result
+                if (result.analysis) {
+                    normalizeAnalysis(result.analysis);
+                }
+                
+                // v3.0.0: Prefer finalized instruments, then instruments, from the analysis object
+                const a = result?.analysis || {};
+                const instruments = Array.isArray(a?.final_instruments)
+                  ? a.final_instruments
+                  : (Array.isArray(a?.instruments) ? a.instruments : []);
+                
+                // v3.2.0: KISS rule with badge styling - if instruments exist, consider success
+                if (instruments.length) {
+                    track.instrumentationState = 'complete';
+                    track.instrumentationPct = 100;
+                    track.instrumentationDisplay = 'complete';
+                } else {
+                    // Only mark error when there are truly no instruments
+                    track.instrumentationState = 'error';
+                    track.instrumentationDisplay = 'error';
+                }
+            } else {
+                track.status = 'ERROR';
+                track.instrumentationState = 'error';
+                track.instrumentationDisplay = 'error';
+                console.error(`[Renderer] Failed: ${track.fileName}`, result.error);
+            }
+        } catch (error) {
+            console.error(`[Renderer] Error: ${track.fileName}:`, error);
+            track.status = 'ERROR';
+            track.instrumentationState = 'error';
+            track.instrumentationDisplay = 'error';
+        }
+        
+        activeWorkers--;
+        updateQueueDisplay();
+        
+        // Start next track
+        if (trackIndex < tracksToProcess.length) {
+            processNextTrack();
+        } else if (activeWorkers === 0) {
+            console.log('[Renderer] All files processed');
+        }
+    };
+    
+    // Start initial workers
+    const initialWorkers = Math.min(concurrency, tracksToProcess.length);
+    for (let i = 0; i < initialWorkers; i++) {
+        processNextTrack();
+    }
 }
 
 function updateQueueDisplay() {
@@ -986,26 +1543,26 @@ function updateQueueDisplay() {
         if (p) {
             if (p.technical) track.techStatus = p.technical.status;
             if (p.creative) track.creativeStatus = p.creative.status;
+            if (p.instrumentation) track.instrumentationState = p.instrumentation.status;
         }
     });
 
-    // Build the status display for each track
+    // v4.0.0: Use the enhanced badge renderer for consistent styling
     const getStatusBadge = (status) => {
-        const statusClass = status ? status.toLowerCase() : 'queued';
-        const label = status === 'PROCESSING' ? `⏳ ${status}` : (status || 'QUEUED');
-        return `<span class="status-badge status-${statusClass}">${label}</span>`;
+        return renderStatusBadge(status);
     };
 
     let html = `
         <h3>Files to Process (${currentQueue.length} total${existingCount > 0 ? ` - ${newCount} new, ${existingCount} existing` : ''})</h3>
         ${existingCount > 0 && !allowReanalyze ? '<p style="color: #f59e0b; margin: 10px 0;">⚠️ Files with existing analysis will be skipped. Check "Re-analyze existing files" to process them.</p>' : ''}
-        <table class="queue-table">
-            <thead>
-                <tr>
-                    <th>File</th>
+        <div class="analysis-table-scroll">
+            <table class="queue-table">
+                <thead>
+                    <tr>
+                        <th>File</th>
                     <th>Technical</th>
                     <th>Creative</th>
-                    <th>Status</th>
+                    <th>Instrumentation</th>
                 </tr>
             </thead>
             <tbody>
@@ -1017,37 +1574,85 @@ function updateQueueDisplay() {
         const displayStatus = track.hasExistingAnalysis ? 
             (allowReanalyze ? 'RE-ANALYZE' : 'SKIP') : 
             track.status;
+        
+        // v1.0.0: Instrumentation column logic - use stable state management
+        let instrumentationDisplay = 'waiting';
+        if (isSkipped) {
+            instrumentationDisplay = 'SKIP';
+        } else if (track.instrumentationDisplay) {
+            // Use the stable instrumentation display value
+            instrumentationDisplay = track.instrumentationDisplay;
+        } else if (track.instrumentationState === 'waiting') {
+            // Only show waiting if explicitly in waiting state
+            instrumentationDisplay = 'waiting';
+        } else {
+            // Fallback for legacy tracks without state management
+            instrumentationDisplay = 'waiting';
+        }
+        
         html += `
             <tr ${rowStyle}>
                 <td>${track.fileName || track.filename || 'Unknown'}</td>
                 <td>${getStatusBadge(isSkipped ? 'SKIP' : (track.techStatus || displayStatus))}</td>
                 <td>${getStatusBadge(isSkipped ? 'SKIP' : (track.creativeStatus || 'WAITING'))}</td>
-                <td>${getStatusBadge(displayStatus)}</td>
+                <td>${isSkipped ? getStatusBadge('SKIP') : getStatusBadge(instrumentationDisplay)}</td>
             </tr>
         `;
     });
     
     html += `
-            </tbody>
-        </table>
+                </tbody>
+            </table>
+        </div>
     `;
     
+    // --- Preserve scroll position of the analysis table wrapper (or window as fallback)
+    const scroller =
+      document.querySelector('.analysis-table-scroll') ||
+      document.querySelector('#panel') ||
+      document.scrollingElement ||
+      document.body;
+    const prevScrollTop = scroller ? scroller.scrollTop : 0;
+    
     queueDiv.innerHTML = html;
+    
+    // --- Restore scroll position (idempotent; safe if scroller changed)
+    const newScroller =
+      document.querySelector('.analysis-table-scroll') ||
+      document.querySelector('#panel') ||
+      document.scrollingElement ||
+      document.body;
+    if (newScroller && typeof prevScrollTop === 'number') {
+      newScroller.scrollTop = prevScrollTop;
+    }
 }
 
-// Listen for progress updates from main process
+// Simple in-memory progressStatus tracking
+let progressStatus = {};
+
+// Register listeners once on boot
 if (window.api && window.api.onJobProgress) {
-    window.api.onJobProgress((event, data) => {
-        console.log('[Renderer] Progress update:', data);
-        if (!progressStatus[data.trackId]) progressStatus[data.trackId] = {};
-        if (data.stage === 'technical') {
-            progressStatus[data.trackId].technical = { status: data.status, note: data.note };
-        } else if (data.stage === 'creative') {
-            progressStatus[data.trackId].creative = { status: data.status, note: data.note };
-        }
-        updateQueueDisplay();
+    window.api.onJobProgress((_e, msg) => { 
+        const { trackId, stage, status, note } = msg; 
+        if (!progressStatus[trackId]) progressStatus[trackId] = {}; 
+        if (stage === 'technical') progressStatus[trackId].technical = { status: status.toLowerCase(), note }; 
+        else if (stage === 'creative') progressStatus[trackId].creative = { status: status.toLowerCase(), note }; 
+        else if (stage === 'instrumentation') progressStatus[trackId].instrumentation = { status: status.toLowerCase(), note }; 
+        updateQueueDisplay(); 
     });
 }
+
+// Unified handler for queue events
+window.rnaQueue?.onEvent?.((ev) => { 
+    // ev = { stage:'CREATIVE'|'TECH'|'INSTR', type:'start'|'done'|'error', fileId, ... } 
+    const trackId = ev.fileId; 
+    if (!progressStatus[trackId]) progressStatus[trackId] = {}; 
+    const map = { start:'processing', done:'complete', error:'error' }; 
+    if (ev.stage === 'CREATIVE') { 
+        progressStatus[trackId].creative = { status: map[ev.type] || 'processing', note: ev.error || '' }; 
+        updateQueueDisplay(); 
+    } 
+});
 
 
 // Listen for queue updates
@@ -1060,6 +1665,8 @@ window.api?.onQueueUpdate?.((event, data) => {
     }
 });
 
+
+// v1.6.3: UI fixes now handled in renderer.html CSS and proper HTML structure
 
 // Tab navigation
 document.getElementById('tab-analysis-btn').addEventListener('click', () => setView('analysis'));

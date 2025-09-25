@@ -23,10 +23,10 @@ async function readJsonSafe(file, fallback) {
   }
 }
 
-async function writeJsonSafe(file, obj) {
-  const tmp = file + '.tmp';
-  await fsp.writeFile(tmp, JSON.stringify(obj, null, 2));
-  await fsp.rename(tmp, file);
+async function writeJsonSafe(destPath, obj) {
+  const tmp = destPath + '.tmp';
+  await fs.promises.writeFile(tmp, JSON.stringify(obj, null, 2));
+  await fs.promises.rename(tmp, destPath);
 }
 
 function defaultCriteria() {
@@ -88,23 +88,47 @@ function mergeTrack(oldRec = {}, newRec = {}) {
   if (typeof cNew.narrative === 'string' && cNew.narrative.trim()) cOut.narrative = cNew.narrative;
   if (Number.isFinite(cNew.confidence)) cOut.confidence = cNew.confidence;
   out.creative = cOut;
+  
+  // Handle analysis field - preserve final_instruments and metadata
+  if (newRec.analysis) {
+    out.analysis = { ...oldRec.analysis, ...newRec.analysis };
+    // Ensure final_instruments, __run_id, and __source_flags are preserved
+    if (newRec.analysis.final_instruments) out.analysis.final_instruments = newRec.analysis.final_instruments;
+    if (newRec.analysis.__run_id) out.analysis.__run_id = newRec.analysis.__run_id;
+    if (newRec.analysis.__source_flags) out.analysis.__source_flags = newRec.analysis.__source_flags;
+  }
+  
   out.updated_at = new Date().toISOString();
   if (!out.created_at) out.created_at = out.analyzed_at || out.updated_at;
   return out;
 }
 
-async function getPaths({ dbFolder, userData }) {
-  const base = dbFolder && dbFolder.trim() ? dbFolder : path.join(userData, 'rhythmdna-db');
-  ensureDir(base);
+function getPaths(dbFolder) {
+  const path = require('path');
+  const root = String(dbFolder);
   return {
-    base,
-    main: path.join(base, 'RhythmDB.json'),
-    criteria: path.join(base, 'CriteriaDB.json')
+    dbPath: path.join(root, 'RhythmDB.json'),
+    criteriaPath: path.join(root, 'CriteriaDB.json'),
   };
 }
 
 async function loadMain(paths) {
-  return readJsonSafe(paths.main, { tracks: {} });
+  const parsed = await readJsonSafe(paths.main, { tracks: {} });
+  
+  // Normalize tracks with title fallback
+  const root = (parsed && typeof parsed === 'object') ? parsed : {};
+  const tracks = Array.isArray(root.tracks) ? root.tracks
+                  : (root.tracks && typeof root.tracks === 'object') ? Object.values(root.tracks) : [];
+  const main = { tracks: tracks.map(t => {
+    const out = t || {};
+    if (!out.title) {
+      const src = out.source || {};
+      const base = (src.title || src.fileName || '') ? String(src.title || src.fileName).replace(/\.[^.]+$/, '') : 'Unknown';
+      out.title = base;
+    }
+    return out;
+  }) };
+  return { main };
 }
 
 async function saveMain(paths, db) {
@@ -122,35 +146,86 @@ async function upsertTrack(paths, analysis) {
   return { key, record: merged, total: Object.keys(db.tracks).length };
 }
 
-async function rebuildCriteria(paths) {
-  const db = await loadMain(paths);
-  const sets = {
-    genre: new Set(),
-    mood: new Set(),
-    instrument: new Set(),
-    vocals: new Set(),
-    theme: new Set(),
-    tempoBands: new Set(),
-    keys: new Set(),
-    artists: new Set()
+async function rebuildCriteria(dbFolderIn) {
+  // Accept either a folder string or a settings object with .dbFolder
+  let dbFolder = dbFolderIn;
+  if (dbFolder && typeof dbFolder === 'object' && dbFolder.dbFolder) {
+    dbFolder = dbFolder.dbFolder;
+  }
+  if (typeof dbFolder !== 'string') {
+    const settings = require('../utils/settings').loadSettings();
+    dbFolder = settings.dbFolder;
+  }
+
+  const fs = require('fs');
+  const { dbPath, criteriaPath } = getPaths(dbFolder);
+
+  // Load DB safely
+  let root = {};
+  try { root = JSON.parse(fs.readFileSync(dbPath, 'utf8')); } catch {}
+
+  // Normalize tracks
+  const tracks = Array.isArray(root.tracks)
+    ? root.tracks
+    : (root.tracks && typeof root.tracks === 'object')
+      ? Object.values(root.tracks)
+      : [];
+
+  // Build unique sets
+  const genreSet = new Set();
+  const moodSet = new Set();
+  const instrSet = new Set();
+  const vocalsSet = new Set();
+  const themeSet = new Set();
+  const keysSet = new Set();
+  const artistsSet = new Set();
+
+  for (const t of tracks) {
+    const cr = (t && t.creative) || {};
+    const ins = (t && t.instrumentation) || {};
+
+    // Creative fields
+    (Array.isArray(cr.genre)  ? cr.genre  : []).forEach(v => v && genreSet.add(v));
+    (Array.isArray(cr.mood)   ? cr.mood   : []).forEach(v => v && moodSet.add(v));
+    (Array.isArray(cr.instrument) ? cr.instrument : []).forEach(v => v && instrSet.add(v));
+    (Array.isArray(cr.vocals) ? cr.vocals : []).forEach(v => v && vocalsSet.add(v));
+    (Array.isArray(cr.theme)  ? cr.theme  : []).forEach(v => v && themeSet.add(v));
+
+    // Instrumentation instruments (actual detected) — merge into instrument set
+    (Array.isArray(ins.instruments) ? ins.instruments : []).forEach(v => v && instrSet.add(v));
+
+    // Optional future fields
+    const src = (t && t.source) || {};
+    if (src.artist) artistsSet.add(src.artist);
+    if (src.key)    keysSet.add(src.key);
+  }
+
+  // Arrays (sorted for determinism)
+  const genre = Array.from(genreSet).sort();
+  const mood = Array.from(moodSet).sort();
+  const instrument = Array.from(instrSet).sort();
+  const vocals = Array.from(vocalsSet).sort();
+  const theme = Array.from(themeSet).sort();
+  const tempoBands = []; // not computed yet
+  const keys = Array.from(keysSet).sort();
+  const artists = Array.from(artistsSet).sort();
+
+  const counts = {
+    genre: genre.length,
+    mood: mood.length,
+    instrument: instrument.length,
+    vocals: vocals.length,
+    theme: theme.length,
+    tempoBands: tempoBands.length,
+    keys: keys.length,
+    artists: artists.length,
   };
-  for (const key of Object.keys(db.tracks)) {
-    const t = db.tracks[key];
-    const c = t.creative || {};
-    for (const k of ['genre','mood','instrument','vocals','theme']) {
-      for (const v of toArray(c[k])) if (v) sets[k].add(String(v));
-    }
-    const band = tempoToBand(Number(t.estimated_tempo_bpm));
-    if (band) sets.tempoBands.add(band);
-    if (t.key) sets.keys.add(String(t.key));
-    if (t.artist) sets.artists.add(String(t.artist));
-  }
-  const crit = defaultCriteria();
-  for (const k of Object.keys(crit)) {
-    crit[k] = Array.from(sets[k]).sort((a,b) => a.localeCompare(b));
-  }
-  await writeJsonSafe(paths.criteria, crit);
-  return { counts: Object.fromEntries(Object.entries(crit).map(([k,v]) => [k, v.length])) };
+
+  const criteria = { genre, mood, instrument, vocals, theme, tempoBands, keys, artists, counts };
+
+  fs.writeFileSync(criteriaPath, JSON.stringify(criteria, null, 2));
+  console.log('[MAIN] Criteria rebuilt:', counts);
+  return criteriaPath;
 }
 
 async function getCriteria(paths) {
@@ -167,12 +242,71 @@ async function getSummary(paths) {
   };
 }
 
+async function createIfMissing(dbFolder) {
+  try {
+    if (!dbFolder || typeof dbFolder !== 'string') {
+      throw new Error('createIfMissing requires a dbFolder string');
+    }
+    
+    const { dbPath, criteriaPath } = getPaths(dbFolder);
+    
+    // Create main DB if missing
+    if (!fs.existsSync(dbPath)) {
+      const rhythmDb = { 
+        tracks: [], 
+        indices: { byPath: {} }, 
+        meta: { version: 1 } 
+      };
+      await writeJsonSafe(dbPath, rhythmDb);
+      console.log('[DB] Created RhythmDB.json');
+    }
+    
+    // Create criteria DB if missing
+    if (!fs.existsSync(criteriaPath)) {
+      const criteriaDb = {
+        genre: [],
+        mood: [],
+        instrument: [],
+        vocals: [],
+        theme: [],
+        tempoBands: [],
+        keys: [],
+        artists: [],
+        counts: {
+          genre: 0,
+          mood: 0,
+          instrument: 0,
+          vocals: 0,
+          theme: 0,
+          tempoBands: 0,
+          keys: 0,
+          artists: 0
+        }
+      };
+      await writeJsonSafe(criteriaPath, criteriaDb);
+      console.log('[DB] Created CriteriaDB.json');
+    }
+    
+    return true;
+  } catch (e) {
+    console.error('[DB] createIfMissing failed:', e);
+    return false;
+  }
+}
+
 module.exports = {
   getPaths,
   upsertTrack,
   rebuildCriteria,
   getCriteria,
-  getSummary
+  getSummary,
+  createIfMissing,
+  mergeFromTrackJson: require('./mergeFromTrackJson').mergeFromTrackJson,
+  ensureAndResolvePaths: function ensureAndResolvePaths(dbFolder) {
+    // Use existing createIfMissing logic, but ensure we pass the dbFolder through.
+    // Without this, createIfMissing throws: "createIfMissing requires a dbFolder string".
+    return createIfMissing(dbFolder);
+  }
 };
 
 

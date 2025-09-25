@@ -3,6 +3,7 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const { shouldGenerateWaveformFor } = require('../utils/audioSiblings');
 
 // Helper to run command
 function run(cmd, args, opts = {}) {
@@ -44,11 +45,19 @@ async function ensureWaveformPng(absPath, opts = {}) {
   const pps = opts.pps ?? 60; // pixels per second
   const color = (opts.color ?? '22c55e').replace('#',''); // green
 
-  // Create deterministic filename
+  // Create standard filename
   const base = path.basename(absPath, path.extname(absPath));
-  const hash = crypto.createHash('md5').update(absPath).digest('hex').slice(0,10);
   const outDir = path.join(dbFolder, 'waveforms');
-  const outPng = path.join(outDir, `${base}.${hash}.wave.png`);
+  const outPng = path.join(outDir, `${base}.png`);
+
+  // Legacy migration: check for old .wave.png files
+  const legacy = path.join(outDir, `${base}.wave.png`);
+  if (!fs.existsSync(outPng) && fs.existsSync(legacy)) {
+    try {
+      fs.copyFileSync(legacy, outPng);
+      console.log('[WAVEFORM] Upgraded legacy waveform:', outPng);
+    } catch {}
+  }
 
   // Check if already exists
   try {
@@ -88,4 +97,81 @@ async function ensureWaveformPng(absPath, opts = {}) {
   }
 }
 
-module.exports = { ensureWaveformPng };
+/**
+ * Write waveform PNG with policy enforcement (prefer MP3, skip WAV twin)
+ * @param {Object} opts - Options object
+ * @param {string} opts.audioPath - Path to audio file
+ * @param {string} opts.dbFolder - Database folder path
+ * @param {number} [opts.width=8000] - Width of waveform
+ * @param {number} [opts.height=180] - Height of waveform
+ * @returns {Object} - Result object with ok, skipped, reason, path properties
+ */
+async function writeWaveformPng({ audioPath, dbFolder, width = 8000, height = 180 }) {
+  try {
+    // Check MP3-twin rule: skip WAV if MP3 twin exists
+    if (!shouldGenerateWaveformFor(audioPath)) {
+      return { 
+        ok: true, 
+        skipped: true, 
+        reason: 'wav-twin-skip' 
+      };
+    }
+    
+    // Generate waveform in lowercase waveforms directory (to match UI expectations)
+    const dir = path.join(dbFolder, 'waveforms');  // lowercase w
+    fs.mkdirSync(dir, { recursive: true });
+    
+    const base = path.basename(audioPath, path.extname(audioPath));
+    const out = path.join(dir, base + '.png');
+    
+    // Legacy migration: check for old .wave.png files
+    const legacy = path.join(dir, base + '.wave.png');
+    if (!fs.existsSync(out) && fs.existsSync(legacy)) {
+      try {
+        fs.copyFileSync(legacy, out);
+        console.log('[WAVEFORM] Upgraded legacy waveform:', out);
+      } catch {}
+    }
+    
+    // Check if already exists
+    if (fs.existsSync(out)) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'already exists',
+        path: out
+      };
+    }
+    
+    // Generate waveform using ffmpeg
+    const duration = await ffprobeDuration(audioPath);
+    const pps = Math.round(width / duration);
+    
+    const args = [
+      '-hide_banner', '-y',
+      '-i', audioPath,
+      '-filter_complex',
+      `aformat=channel_layouts=mono,showwavespic=s=${width}x${height}:colors=22c55e`,
+      '-frames:v', '1',
+      out,
+    ];
+    
+    await run('ffmpeg', args);
+    
+    return {
+      ok: true,
+      skipped: false,
+      path: out
+    };
+    
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message,
+      skipped: false,
+      path: null
+    };
+  }
+}
+
+module.exports = { ensureWaveformPng, writeWaveformPng };
